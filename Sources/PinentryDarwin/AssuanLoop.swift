@@ -1,0 +1,535 @@
+// SPDX-License-Identifier: MIT
+// Copyright 2026 Ryan Whitworth.
+//
+// AssuanLoop.swift — the protocol-handler that drives one pinentry session.
+//
+// Lifecycle:
+//   1. emit greeting
+//   2. read commands until BYE / EOF
+//   3. for SETxxx commands, mutate `dialog`
+//   4. for GETPIN / CONFIRM / MESSAGE, build a DialogSpec and present via
+//      the coordinator; map the DialogResult back to the wire
+//   5. for GETINFO / CLEARPASSPHRASE / RESET, respond inline
+//
+// Confidentiality:
+//   - PIN bytes flow through `SecureBytes` end-to-end. We never log them and
+//     never reach for `String(data:)` on a `D` payload.
+//   - Any thrown error from a Session call is logged as a generic "internal
+//     error"; the original `Error` is **not** included in the log message
+//     because some session errors carry transcripts that could embed user
+//     text. Wire response is a generic ERR.
+
+import Foundation
+import os
+import AppKit
+import AssuanProtocol
+import KeychainStore
+import PinentryUI
+import SecureMemory
+
+// MARK: - Logger
+
+/// Control-flow logger only. Never log secrets or quality scores.
+private let log = Logger(subsystem: "org.whitworth.pinentry-darwin", category: "assuan")
+
+// MARK: - DialogState
+
+/// Per-request state accumulated from SET* commands. Reset on RESET. Some
+/// fields (notably `error`) are also cleared after the request that consumes
+/// them, matching upstream pinentry's "error message is one-shot" behaviour.
+private struct DialogState {
+    var description: String?
+    var prompt: String?
+    var title: String?
+    var error: String?
+
+    var okLabel: String?
+    var notOKLabel: String?
+    var cancelLabel: String?
+
+    var keyInfo: Command.KeyInfo?
+
+    var repeatPrompt: String?
+    var repeatError: String?
+    var repeatOK: String?
+
+    var timeoutSeconds: Int?
+
+    var qualityBar: String?
+    var qualityBarTooltip: String?
+
+    var genpinLabel: String?
+    var genpinTooltip: String?
+
+    /// Reset everything except the OptionState mirror — RESET clears request
+    /// state but option negotiation persists across the session.
+    mutating func resetAll() {
+        description = nil
+        prompt = nil
+        title = nil
+        error = nil
+        okLabel = nil
+        notOKLabel = nil
+        cancelLabel = nil
+        keyInfo = nil
+        repeatPrompt = nil
+        repeatError = nil
+        repeatOK = nil
+        timeoutSeconds = nil
+        qualityBar = nil
+        qualityBarTooltip = nil
+        genpinLabel = nil
+        genpinTooltip = nil
+    }
+}
+
+// MARK: - AssuanLoop
+
+@MainActor
+final class AssuanLoop {
+
+    // MARK: Stored
+
+    private let session: Session
+    private let coordinator: PinentryCoordinator
+    private let keychain: KeychainStore
+    private let prefs: UserPrefs
+
+    /// Latest accumulated OPTION state.
+    private var optionState = OptionState()
+    /// Per-request strings/labels.
+    private var dialog = DialogState()
+
+    /// Set after a GETPIN that returned a cached entry. If gpg-agent asks
+    /// again in the same session it means the cached value was wrong — skip
+    /// the cache and fall through to the UI.
+    private var triedKeychainThisSession = false
+
+    // MARK: Init
+
+    init(
+        session: Session,
+        coordinator: PinentryCoordinator,
+        keychain: KeychainStore,
+        prefs: UserPrefs
+    ) {
+        self.session = session
+        self.coordinator = coordinator
+        self.keychain = keychain
+        self.prefs = prefs
+    }
+
+    // MARK: Run
+
+    /// Drive the session to completion. Returns when BYE is received or the
+    /// peer closes stdin (which `Session.nextCommand()` reports as `.bye`).
+    func run() async {
+        do {
+            try await session.emitGreeting()
+        } catch {
+            log.error("greeting send failed; bailing out")
+            return
+        }
+
+        while true {
+            let cmd: Command
+            do {
+                cmd = try await session.nextCommand()
+            } catch {
+                log.error("nextCommand threw; aborting loop")
+                _ = try? await sendErr(code: AssuanError.general,
+                                       message: "internal error")
+                return
+            }
+
+            switch cmd {
+            case .bye:
+                _ = try? await session.send(.ok)
+                return
+
+            case .reset:
+                dialog.resetAll()
+                triedKeychainThisSession = false
+                await reply(.ok)
+
+            case .option(let key, let value):
+                optionState.apply(key: key, value: value)
+                await reply(.ok)
+
+            case .setDesc(let s):
+                dialog.description = s
+                await reply(.ok)
+            case .setPrompt(let s):
+                dialog.prompt = s
+                await reply(.ok)
+            case .setTitle(let s):
+                dialog.title = s
+                await reply(.ok)
+            case .setError(let s):
+                dialog.error = s
+                await reply(.ok)
+            case .setOK(let s):
+                dialog.okLabel = s
+                await reply(.ok)
+            case .setNotOK(let s):
+                dialog.notOKLabel = s
+                await reply(.ok)
+            case .setCancel(let s):
+                dialog.cancelLabel = s
+                await reply(.ok)
+
+            case .setKeyInfo(let ki):
+                switch ki {
+                case .clear:
+                    dialog.keyInfo = nil
+                case .key:
+                    dialog.keyInfo = ki
+                }
+                await reply(.ok)
+
+            case .setRepeat(let s):
+                dialog.repeatPrompt = s
+                await reply(.ok)
+            case .setRepeatOK(let s):
+                dialog.repeatOK = s
+                await reply(.ok)
+            case .setRepeatError(let s):
+                dialog.repeatError = s
+                await reply(.ok)
+
+            case .setTimeout(let n):
+                dialog.timeoutSeconds = n
+                await reply(.ok)
+
+            case .setQualityBar(let label):
+                dialog.qualityBar = label ?? ""
+                await reply(.ok)
+            case .setQualityBarTT(let s):
+                dialog.qualityBarTooltip = s
+                await reply(.ok)
+
+            case .setGenpinLabel(let s):
+                // Stub: stored for future v1.1 generation UI.
+                dialog.genpinLabel = s
+                await reply(.ok)
+            case .setGenpinTT(let s):
+                dialog.genpinTooltip = s
+                await reply(.ok)
+
+            case .getPin:
+                await handleGetPin()
+
+            case .confirm(let oneButton):
+                await handleConfirm(oneButton: oneButton)
+
+            case .message:
+                await handleMessage()
+
+            case .getInfo(let topic):
+                await handleGetInfo(topic)
+
+            case .clearPassphrase(let keyInfo):
+                handleClearPassphrase(keyInfo)
+                await reply(.ok)
+
+            case .unknown(let verb, _):
+                await reply(.err(code: AssuanError.general,
+                                 message: "Unknown command: \(verb)"))
+            }
+        }
+    }
+
+    // MARK: GETPIN
+
+    private func handleGetPin() async {
+        // 1. Cache lookup, if eligible and not yet tried this session.
+        if !triedKeychainThisSession,
+           case .key(_, let fpr)? = dialog.keyInfo,
+           optionState.allowExternalPasswordCache,
+           prefs.keychainEnabled
+        {
+            triedKeychainThisSession = true
+            do {
+                if let cached = try keychain.lookup(fingerprint: fpr) {
+                    log.info("returning cached passphrase from keychain")
+                    await reply(.status(keyword: "PASSWORD_FROM_CACHE",
+                                        parameters: ""))
+                    await reply(.data(cached))
+                    await reply(.ok)
+                    dialog.error = nil
+                    return
+                }
+            } catch {
+                // Lookup failures are non-fatal — fall through to UI.
+                log.error("keychain lookup failed; falling back to UI")
+            }
+        }
+
+        // 2. Build spec and present.
+        let spec = buildPinSpec()
+        let result = await coordinator.present(spec)
+
+        switch result {
+        case .pin(let secure, let savedToKeychain):
+            // Optional store-on-submit. Best effort: any failure is logged
+            // but does not prevent us from returning the passphrase.
+            if savedToKeychain,
+               case .key(_, let fpr)? = dialog.keyInfo,
+               prefs.keychainEnabled
+            {
+                let label = parseUserId(from: dialog.description)
+                do {
+                    try keychain.store(fingerprint: fpr,
+                                       label: label,
+                                       passphrase: secure)
+                } catch {
+                    log.error("keychain store failed; passphrase not cached")
+                }
+            }
+
+            await reply(.data(secure))
+            if dialog.repeatPrompt != nil {
+                await reply(.status(keyword: "PIN_REPEATED", parameters: ""))
+            }
+            await reply(.ok)
+
+        case .canceled:
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation cancelled"))
+
+        case .windowClosed:
+            await reply(.status(keyword: "BUTTON_INFO", parameters: "close"))
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation cancelled"))
+
+        case .timedOut:
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation timed out"))
+
+        case .confirmed, .notConfirmed:
+            // These should not reach a GETPIN flow; treat as cancel.
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation cancelled"))
+        }
+
+        // Per upstream: clear the one-shot error after each GETPIN.
+        dialog.error = nil
+    }
+
+    // MARK: CONFIRM
+
+    private func handleConfirm(oneButton: Bool) async {
+        let spec = buildConfirmSpec(oneButton: oneButton)
+        let result = await coordinator.present(spec)
+
+        switch result {
+        case .confirmed:
+            await reply(.ok)
+        case .notConfirmed:
+            await reply(.err(code: AssuanError.notConfirmed,
+                             message: "Not confirmed"))
+        case .canceled:
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation cancelled"))
+        case .windowClosed:
+            await reply(.status(keyword: "BUTTON_INFO", parameters: "close"))
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation cancelled"))
+        case .timedOut:
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation timed out"))
+        case .pin:
+            // Should not occur for CONFIRM; treat as cancel.
+            await reply(.err(code: AssuanError.canceled,
+                             message: "Operation cancelled"))
+        }
+
+        dialog.error = nil
+    }
+
+    // MARK: MESSAGE
+
+    private func handleMessage() async {
+        let spec = buildMessageSpec()
+        // MESSAGE is a single-OK acknowledgement; coordinator's MessageView
+        // returns .confirmed. Whatever comes back, MESSAGE always resolves
+        // with OK (no ERR variant) to match upstream behaviour.
+        _ = await coordinator.present(spec)
+        await reply(.ok)
+        dialog.error = nil
+    }
+
+    // MARK: GETINFO
+
+    private func handleGetInfo(_ topic: Command.GetInfoTopic) async {
+        switch topic {
+        case .version:
+            await sendInfoLine(resolvedVersion())
+        case .pid:
+            await sendInfoLine(String(getpid()))
+        case .flavor:
+            await sendInfoLine("darwin")
+        case .ttyinfo:
+            let name = optionState.ttyName ?? "-"
+            let type = optionState.ttyType ?? "-"
+            // Last field is `is_emacs` — always 0 for us.
+            await sendInfoLine("\(name) \(type) 0")
+        case .other:
+            await reply(.err(code: AssuanError.general,
+                             message: "unknown getinfo"))
+        }
+    }
+
+    /// Encode an ASCII info string into a SecureBytes-backed `D` line + OK.
+    /// We use SecureBytes because that's the only `Response.data` payload
+    /// type; the bytes here are not secret but the wrapper is harmless.
+    private func sendInfoLine(_ value: String) async {
+        let bytes = Array(value.utf8)
+        if bytes.isEmpty {
+            // SecureBytes requires non-empty; emit OK only.
+            await reply(.ok)
+            return
+        }
+        let secure = SecureBytes(bytes)
+        await reply(.data(secure))
+        await reply(.ok)
+    }
+
+    // MARK: CLEARPASSPHRASE
+
+    /// Parse `<mode>/<fingerprint>` (or `--clear`) and forget the entry.
+    /// Errors are swallowed — CLEARPASSPHRASE is best-effort.
+    private func handleClearPassphrase(_ keyInfo: String) {
+        let trimmed = keyInfo.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || trimmed == "--clear" {
+            return
+        }
+        guard let slash = trimmed.firstIndex(of: "/") else {
+            return
+        }
+        let fpr = String(trimmed[trimmed.index(after: slash)...])
+        if fpr.isEmpty { return }
+        do {
+            try keychain.clear(fingerprint: fpr)
+        } catch {
+            log.error("keychain clear failed for clearpassphrase")
+        }
+    }
+
+    // MARK: Spec builders
+
+    private func buildPinSpec() -> DialogSpec {
+        var defaults = DialogSpec.DefaultLabels()
+        if let v = optionState.defaultOK { defaults.ok = v }
+        if let v = optionState.defaultCancel { defaults.cancel = v }
+        if let v = optionState.defaultPrompt { defaults.prompt = v }
+
+        let keyInfo: DialogSpec.KeyInfo?
+        if case .key(let mode, let fpr)? = dialog.keyInfo {
+            keyInfo = .key(mode: mode, fingerprint: fpr)
+        } else {
+            keyInfo = nil
+        }
+
+        let allowSave: Bool = {
+            guard keyInfo != nil else { return false }
+            guard optionState.allowExternalPasswordCache else { return false }
+            return prefs.keychainEnabled
+        }()
+
+        return DialogSpec(
+            kind: .pin,
+            title: dialog.title,
+            description: dialog.description,
+            prompt: dialog.prompt,
+            error: dialog.error,
+            okLabel: dialog.okLabel,
+            notOKLabel: dialog.notOKLabel,
+            cancelLabel: dialog.cancelLabel,
+            repeatPrompt: dialog.repeatPrompt,
+            repeatError: dialog.repeatError,
+            repeatOK: dialog.repeatOK,
+            qualityBarLabel: dialog.qualityBar,
+            qualityBarTooltip: dialog.qualityBarTooltip,
+            keyInfo: keyInfo,
+            allowKeychainSave: allowSave,
+            timeoutSeconds: dialog.timeoutSeconds,
+            defaults: defaults
+        )
+    }
+
+    private func buildConfirmSpec(oneButton: Bool) -> DialogSpec {
+        var defaults = DialogSpec.DefaultLabels()
+        if let v = optionState.defaultOK { defaults.ok = v }
+        if let v = optionState.defaultCancel { defaults.cancel = v }
+        if let v = optionState.defaultPrompt { defaults.prompt = v }
+
+        return DialogSpec(
+            kind: .confirm(oneButton: oneButton),
+            title: dialog.title,
+            description: dialog.description,
+            prompt: dialog.prompt,
+            error: dialog.error,
+            okLabel: dialog.okLabel,
+            notOKLabel: dialog.notOKLabel,
+            cancelLabel: dialog.cancelLabel,
+            timeoutSeconds: dialog.timeoutSeconds,
+            defaults: defaults
+        )
+    }
+
+    private func buildMessageSpec() -> DialogSpec {
+        var defaults = DialogSpec.DefaultLabels()
+        if let v = optionState.defaultOK { defaults.ok = v }
+
+        return DialogSpec(
+            kind: .message,
+            title: dialog.title,
+            description: dialog.description,
+            error: dialog.error,
+            okLabel: dialog.okLabel,
+            timeoutSeconds: dialog.timeoutSeconds,
+            defaults: defaults
+        )
+    }
+
+    // MARK: - Send helpers
+
+    /// Send a response, swallowing IO errors (they almost always mean the
+    /// peer closed; the next read will surface that as EOF / .bye).
+    private func reply(_ response: Response) async {
+        do {
+            try await session.send(response)
+        } catch {
+            log.error("send failed; peer probably gone")
+        }
+    }
+
+    /// Last-ditch error send — used when we want to know whether stdout is
+    /// still alive. Returns the result of the underlying call.
+    private func sendErr(code: UInt32, message: String) async throws {
+        try await session.send(.err(code: code, message: message))
+    }
+}
+
+// MARK: - parseUserId
+
+/// Extract the first quoted substring from a SETDESC line.
+///
+/// gpg-agent's stock SETDESC reads roughly:
+///   `Please enter the passphrase to unlock the OpenPGP secret key:%0A"Alice <a@b>"%0A...`
+///
+/// We pick the first `"..."` pair, percent-decoded already by the parser, and
+/// return its contents. Returns nil if no balanced pair is found — the
+/// keychain layer then falls back to using the service name as a label.
+func parseUserId(from description: String?) -> String? {
+    guard let description else { return nil }
+    guard let first = description.firstIndex(of: "\"") else { return nil }
+    let afterFirst = description.index(after: first)
+    guard afterFirst < description.endIndex else { return nil }
+    guard let second = description[afterFirst...].firstIndex(of: "\"") else {
+        return nil
+    }
+    let label = String(description[afterFirst..<second])
+    return label.isEmpty ? nil : label
+}
