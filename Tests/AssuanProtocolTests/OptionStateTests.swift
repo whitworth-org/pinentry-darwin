@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: MIT
+// Copyright 2026 Ryan Whitworth.
+//
+// OptionStateTests — drive a sequence of OPTION commands through
+// `OptionState.apply` and assert the resulting state.
+
+import XCTest
+@testable import AssuanProtocol
+
+// MARK: - OptionStateTests
+
+final class OptionStateTests: XCTestCase {
+
+    func testGrabFlagsToggle() {
+        var s = OptionState()
+        s.apply(key: "grab", value: nil)
+        XCTAssertTrue(s.grab)
+        s.apply(key: "no-grab", value: nil)
+        XCTAssertFalse(s.grab)
+    }
+
+    func testTextOptionsAccumulate() {
+        var s = OptionState()
+        s.apply(key: "ttyname", value: "/dev/ttys001")
+        s.apply(key: "ttytype", value: "xterm-256color")
+        s.apply(key: "lc-ctype", value: "en_US.UTF-8")
+        s.apply(key: "lc-messages", value: "en_US.UTF-8")
+
+        XCTAssertEqual(s.ttyName, "/dev/ttys001")
+        XCTAssertEqual(s.ttyType, "xterm-256color")
+        XCTAssertEqual(s.lcCType, "en_US.UTF-8")
+        XCTAssertEqual(s.lcMessages, "en_US.UTF-8")
+    }
+
+    func testDefaultButtons() {
+        var s = OptionState()
+        s.apply(key: "default-ok", value: "OK")
+        s.apply(key: "default-cancel", value: "Cancel")
+        s.apply(key: "default-prompt", value: "Passphrase:")
+
+        XCTAssertEqual(s.defaultOK, "OK")
+        XCTAssertEqual(s.defaultCancel, "Cancel")
+        XCTAssertEqual(s.defaultPrompt, "Passphrase:")
+    }
+
+    func testAllowExternalPasswordCache() {
+        var s = OptionState()
+        XCTAssertFalse(s.allowExternalPasswordCache)
+        s.apply(key: "allow-external-password-cache", value: nil)
+        XCTAssertTrue(s.allowExternalPasswordCache)
+    }
+
+    func testParseOwner() {
+        var s = OptionState()
+        s.apply(key: "owner", value: "12345/501 myhost")
+        XCTAssertEqual(s.ownerPID, 12345)
+        XCTAssertEqual(s.ownerUID, 501)
+        XCTAssertEqual(s.ownerHost, "myhost")
+    }
+
+    func testParseOwnerPIDOnly() {
+        var s = OptionState()
+        s.apply(key: "owner", value: "9999")
+        XCTAssertEqual(s.ownerPID, 9999)
+        XCTAssertNil(s.ownerUID)
+        XCTAssertNil(s.ownerHost)
+    }
+
+    func testConstraints() {
+        var s = OptionState()
+        s.apply(key: "constraints-enforce", value: nil)
+        s.apply(key: "constraints-hint-short", value: "8+ chars")
+        s.apply(key: "constraints-hint-long", value: "Use 8 or more characters.")
+        s.apply(key: "constraints-error-title", value: "Too short")
+
+        XCTAssertTrue(s.constraintsEnforce)
+        XCTAssertEqual(s.constraintsHintShort, "8+ chars")
+        XCTAssertEqual(s.constraintsHintLong, "Use 8 or more characters.")
+        XCTAssertEqual(s.constraintsErrorTitle, "Too short")
+    }
+
+    func testUnknownOptionIgnored() {
+        var s = OptionState()
+        let before = s
+        s.apply(key: "no-such-option", value: "whatever")
+        XCTAssertEqual(s, before)
+    }
+}
