@@ -37,17 +37,21 @@ APP_CONTENTS    := $(APP_BUNDLE)/Contents
 APP_MACOS       := $(APP_CONTENTS)/MacOS
 RELEASE_BIN     := .build/release/$(APP_NAME)
 
+# Architecture suffix for release artefacts. Shipping arm64-only for now;
+# add a fat-binary swift build invocation when Intel support lands.
+ARCH            := $(shell uname -m)
+
 ENTITLEMENTS    := App/$(APP_NAME).entitlements
 INFO_PLIST      := App/Info.plist
 
 ZIP_PATH        := $(BUILD_DIR)/$(APP_NAME).zip
-TARBALL_PATH    := $(BUILD_DIR)/$(APP_NAME)-$(VERSION).tar.gz
+TARBALL_PATH    := $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-$(ARCH).tar.gz
 PKG_UNSIGNED    := $(BUILD_DIR)/$(APP_NAME)-unsigned.pkg
 PKG_SIGNED      := $(BUILD_DIR)/$(APP_NAME)-$(VERSION).pkg
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug test smoke check-signing sign notarize pkg tarball release clean
+.PHONY: help build debug test smoke audit audit-release check-signing sign notarize pkg tarball release clean
 
 # --- Targets -----------------------------------------------------------------
 
@@ -58,6 +62,8 @@ help:
 	@echo "  debug           swift build (debug, no bundle)"
 	@echo "  test            swift test"
 	@echo "  smoke           feed an Assuan transcript to the bundled binary"
+	@echo "  audit           static-audit the built .app bundle (Mach-O, plist, entitlements)"
+	@echo "  audit-release   like audit, plus require Developer ID + stapled notarization"
 	@echo "  check-signing   verify Developer ID identity for Team $(TEAM_ID)"
 	@echo "  sign            codesign the .app bundle (depends: build, check-signing)"
 	@echo "  notarize        submit to notarytool and staple (depends: sign)"
@@ -88,6 +94,12 @@ test:
 
 smoke: build
 	scripts/smoke-assuan.sh build/pinentry-darwin.app/Contents/MacOS/pinentry-darwin
+
+audit: build
+	scripts/audit-bundle.sh $(APP_BUNDLE)
+
+audit-release:
+	scripts/audit-bundle.sh --release $(APP_BUNDLE)
 
 check-signing:
 	@if ! security find-identity -v -p codesigning | grep -F "($(TEAM_ID))" >/dev/null; then \
