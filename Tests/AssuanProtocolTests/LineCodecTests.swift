@@ -121,4 +121,59 @@ final class LineCodecTests: XCTestCase {
             XCTAssertEqual(Array(buf), Array("hello world!".utf8))
         }
     }
+
+    // MARK: Data-line encoding (no '+' ↔ space)
+
+    // Per the Assuan spec, `D` payloads percent-escape control / `%` / `+`
+    // but pass spaces through verbatim. The command-argument convention
+    // (space → '+') would corrupt any space-bearing passphrase.
+    func testDataLineSpacePassesThrough() {
+        let bytes = Array("hello world".utf8)
+        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        XCTAssertEqual(escaped, "hello world")
+    }
+
+    func testDataLinePlusEscaped() {
+        let bytes = Array("a+b".utf8)
+        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        XCTAssertEqual(escaped, "a%2Bb",
+                       "literal '+' must be %HH-escaped on D lines so a peer using either decoder reads it back as '+'")
+    }
+
+    func testDataLinePercentEscaped() {
+        let bytes = Array("100%".utf8)
+        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        XCTAssertEqual(escaped, "100%25")
+    }
+
+    func testDataLineControlBytesEscaped() {
+        let bytes: [UInt8] = [0x09, 0x0A, 0x0D, 0x1F]
+        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        XCTAssertEqual(escaped, "%09%0A%0D%1F")
+    }
+
+    func testDataLineRoundTripWithSpaces() throws {
+        let original = Array("password with multiple spaces".utf8)
+        let escaped = original.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        XCTAssertEqual(escaped, "password with multiple spaces")
+        let decoded = try LineCodec.unescapeFromDataLine(escaped)
+        XCTAssertEqual(decoded, original)
+    }
+
+    func testDataLineDecoderTreatsPlusAsLiteral() throws {
+        // On a D line, a literal '+' must NOT be decoded to space — that's
+        // the command-arg behaviour. The encoder %2B-escapes literal '+',
+        // so a bare '+' in a `D` payload from a peer must round-trip as '+'.
+        let decoded = try LineCodec.unescapeFromDataLine("a+b")
+        XCTAssertEqual(decoded, Array("a+b".utf8))
+    }
+
+    func testDataLineAllByteValuesRoundTrip() throws {
+        for v in 0...255 {
+            let original: [UInt8] = [UInt8(v)]
+            let escaped = original.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+            let decoded = try LineCodec.unescapeFromDataLine(escaped)
+            XCTAssertEqual(decoded, original, "byte 0x\(String(v, radix: 16)) failed D-line round-trip")
+        }
+    }
 }

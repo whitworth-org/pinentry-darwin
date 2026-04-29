@@ -6,16 +6,30 @@
 // /Users/rwhitworth/Development/pinentry/pinentry/pinentry.c lines 244–295
 // (`copy_and_escape`, `do_unescape_inplace`).
 //
-// Wire rules:
+// Two encoder/decoder pairs, used in different contexts:
+//
+//   1. Command-argument encoding (`escape` / `unescape`): used for OPTION
+//      values, SETDESC/SETPROMPT/etc. arguments, and the INQUIRE QUALITY
+//      argument. Space ↔ '+' substitution applies here. Mirrors upstream
+//      `copy_and_escape` (pinentry.c:244–268).
+//
+//   2. Data-line encoding (`escapeForDataLine` / `unescapeFromDataLine`):
+//      used for `D` payloads on both directions. Per the Assuan spec
+//      (https://www.gnupg.org/documentation/manuals/assuan/, "Data
+//      Lines"), data-line payloads percent-escape control bytes and the
+//      special characters `%`, `+`, but do NOT substitute `+` for space.
+//      This is critical for passphrases containing spaces — our previous
+//      symmetric use of the command-arg encoder for `D` lines would have
+//      corrupted any space-bearing passphrase on the wire.
+//
+// Common rules across both:
 //   * Bytes < 0x20 (control) and the literal '+' (0x2B) and '%' (0x25) are
 //     percent-escaped as %HH (uppercase hex). The C source escapes only
 //     `< 0x20` and `+`; we additionally escape `%` itself so that round-trips
-//     preserve a literal percent sign — without this, a `%` in plaintext
-//     would survive escape unchanged and then be misinterpreted as the start
-//     of an escape on decode.
-//   * Space (0x20) is encoded as '+'. Decoding maps '+' back to space.
-//   * Lines are LF-terminated (0x0A); payload max 1000 bytes (LineCodec
-//     enforces this on both encode and decode).
+//     preserve a literal percent sign.
+//   * Bytes ≥ 0x7F are also %HH-escaped: Swift's `String(decoding:as:)`
+//     would otherwise replace lone high bytes with U+FFFD, losing data.
+//   * Lines are LF-terminated (0x0A); payload max 1000 bytes.
 
 import Foundation
 import SecureMemory
@@ -66,13 +80,55 @@ public enum LineCodec {
     }
 
     /// Decode an Assuan-escaped substring directly into a `SecureBytes`. This
-    /// is the path used for `D`-line passphrase data: the decoded bytes never
-    /// touch a `Swift.String` or `Array<UInt8>`.
+    /// is used for command-argument decoding into a secure buffer; for
+    /// `D`-line payloads use `unescapeFromDataLine(_:into:)` instead, which
+    /// skips the `+`↔space substitution.
     public static func unescape(_ s: Substring, into out: SecureBytes) throws {
         if s.utf8.count > maxLineLength {
             throw DecodeError.lineTooLong
         }
-        try decodeBytes(s) { byte in
+        try decodeBytes(s, plusIsSpace: true) { byte in
+            out.append(byte)
+        }
+    }
+
+    // MARK: Data-line escape (no + ↔ space)
+
+    /// Percent-escape a buffer for transmission on an Assuan `D` line. Differs
+    /// from `escape` in that space (0x20) passes through verbatim — the `+`
+    /// substitution is a command-argument convention only, not a data-line
+    /// rule (Assuan spec, "Data Lines").
+    public static func escapeForDataLine(_ bytes: UnsafeBufferPointer<UInt8>) -> String {
+        var out = [UInt8]()
+        out.reserveCapacity(bytes.count * 3)
+        for b in bytes {
+            appendEscapedForDataLine(byte: b, into: &out)
+        }
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    /// Decode a `D`-line escaped string. Mirrors `escapeForDataLine`: `%HH`
+    /// is decoded; `+` is left as a literal `+`; everything else passes
+    /// through.
+    public static func unescapeFromDataLine(_ s: String) throws -> [UInt8] {
+        if s.utf8.count > maxLineLength {
+            throw DecodeError.lineTooLong
+        }
+        var out = [UInt8]()
+        out.reserveCapacity(s.utf8.count)
+        try decodeBytes(s[...], plusIsSpace: false) { byte in
+            out.append(byte)
+        }
+        return out
+    }
+
+    /// Like `unescapeFromDataLine` but routes bytes into a `SecureBytes`
+    /// without ever copying through a `Swift.String` or `Array<UInt8>`.
+    public static func unescapeFromDataLine(_ s: Substring, into out: SecureBytes) throws {
+        if s.utf8.count > maxLineLength {
+            throw DecodeError.lineTooLong
+        }
+        try decodeBytes(s, plusIsSpace: false) { byte in
             out.append(byte)
         }
     }
@@ -102,6 +158,19 @@ public enum LineCodec {
         }
     }
 
+    /// Like `appendEscaped` but does NOT remap space → '+'. Used for `D`-line
+    /// payloads where the `+` substitution would corrupt space-bearing data.
+    private static func appendEscapedForDataLine(byte b: UInt8, into out: inout [UInt8]) {
+        switch b {
+        case 0x2B, 0x25: // '+' or '%' -> %HH
+            appendPercentHex(b, into: &out)
+        case 0..<0x20, 0x7F...0xFF: // control / 8-bit -> %HH
+            appendPercentHex(b, into: &out)
+        default: // space and printable bytes pass through
+            out.append(b)
+        }
+    }
+
     private static func appendPercentHex(_ b: UInt8, into out: inout [UInt8]) {
         out.append(0x25) // '%'
         out.append(hexDigit(b >> 4))
@@ -114,14 +183,17 @@ public enum LineCodec {
     }
 
     /// Walk an escaped substring and emit each decoded byte via `sink`.
-    /// Decoding rules mirror upstream `do_unescape_inplace`:
+    ///
+    /// Decoding rules:
     ///   * `%HH` → byte with that hex value (HH must be two hex digits).
-    ///   * `+`   → space (0x20).
+    ///   * `+`   → space (0x20) when `plusIsSpace` is true (command-argument
+    ///             convention); literal `+` (0x2B) when false (D-line rule).
     ///   * everything else → pass through, treating each UTF-8 code unit as
     ///     a literal byte.
     /// A trailing bare `%` or `%X` (one hex digit) is rejected as invalid.
     private static func decodeBytes(
         _ s: Substring,
+        plusIsSpace: Bool = true,
         sink: (UInt8) throws -> Void
     ) throws {
         let utf8 = Array(s.utf8)
@@ -141,7 +213,7 @@ public enum LineCodec {
                 try sink((hi << 4) | lo)
                 i += 3
             } else if b == 0x2B { // '+'
-                try sink(0x20)
+                try sink(plusIsSpace ? 0x20 : 0x2B)
                 i += 1
             } else {
                 try sink(b)

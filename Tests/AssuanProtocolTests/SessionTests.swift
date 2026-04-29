@@ -76,7 +76,7 @@ final class SessionTests: XCTestCase {
         let (session, agentWrite, agentRead) = makeSession()
         defer { try? agentWrite.close() }
 
-        // Build a SecureBytes containing "p w%d" (with space, percent, control)
+        // Build a SecureBytes containing "p w%d" (with space and percent).
         let pin: [UInt8] = Array("p w%d".utf8)
         let secure = SecureBytes(pin)
 
@@ -84,8 +84,10 @@ final class SessionTests: XCTestCase {
         try await session.send(.ok)
 
         let dLine = try readLine(agentRead)
-        // "p w%d" -> 'p','+',w','%','25','d' = "p+w%25d"
-        XCTAssertEqual(dLine, "D p+w%25d")
+        // Per Assuan spec: D-line payloads carry spaces verbatim (no '+'
+        // substitution); only '%' / '+' / control bytes get %HH-escaped.
+        // "p w%d" -> "p w%25d"
+        XCTAssertEqual(dLine, "D p w%25d")
 
         let okLine = try readLine(agentRead)
         XCTAssertEqual(okLine, "OK")

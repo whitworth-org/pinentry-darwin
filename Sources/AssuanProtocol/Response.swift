@@ -100,8 +100,13 @@ extension Response {
     /// the wire anyway. We deliberately do not retain the SecureBytes
     /// outside the closure.
     private func encodeDataLine(_ secure: SecureBytes) -> Data {
+        // CRITICAL: data-line escaping must NOT remap space → '+'. The
+        // '+' substitution is a command-argument convention only; per the
+        // Assuan spec, `D` payloads carry spaces verbatim. Using the
+        // command-arg encoder here would corrupt any passphrase that
+        // contained a space.
         return secure.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> Data in
-            let escaped = LineCodec.escape(buf)
+            let escaped = LineCodec.escapeForDataLine(buf)
             var d = Data()
             d.reserveCapacity(2 + escaped.utf8.count + 1)
             d.append(0x44) // 'D'

@@ -124,9 +124,12 @@ public actor Session {
             if reply.hasPrefix("D ") {
                 if gotValue == nil {
                     let payload = reply.dropFirst(2)
-                    // The response is a signed decimal integer. We decode
-                    // the (possibly escaped) text into bytes, then parse.
-                    let bytes = (try? LineCodec.unescape(String(payload))) ?? []
+                    // The response is a signed decimal integer. Decode using
+                    // the data-line decoder (no '+'↔space) since `D` payloads
+                    // carry literal `+` characters by spec; using the
+                    // command-arg decoder would silently rewrite any '+' to
+                    // space and skew parsing.
+                    let bytes = (try? LineCodec.unescapeFromDataLine(String(payload))) ?? []
                     if let s = String(bytes: bytes, encoding: .ascii) {
                         gotValue = Int(s.trimmingCharacters(in: .whitespaces))
                     }

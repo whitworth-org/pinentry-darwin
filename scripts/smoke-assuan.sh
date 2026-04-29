@@ -64,9 +64,9 @@ assert "greeting"        '^OK Pleased to meet you'                || fails=$((fa
 assert "version reply"   '^D [0-9]+\.[0-9]+\.[0-9]+'              || fails=$((fails+1))
 assert "flavor reply"    '^D darwin'                               || fails=$((fails+1))
 assert "pid reply"       '^D [0-9]+'                               || fails=$((fails+1))
-# ttyinfo response carries spaces, which the wire codec encodes as '+'
-# (matches upstream pinentry's copy_and_escape — pinentry.c:262).
-assert "ttyinfo reply"   '^D /dev/ttys042\+xterm-256color\+0$'     || fails=$((fails+1))
+# ttyinfo response carries spaces. Per Assuan spec, D-line payloads carry
+# spaces verbatim (no '+'↔space substitution — that's command-arg only).
+assert "ttyinfo reply"   '^D /dev/ttys042 xterm-256color 0$'       || fails=$((fails+1))
 assert "ERR on unknown getinfo" '^ERR '                            || fails=$((fails+1))
 
 # Count OK lines: greeting + every command that returned OK (every OPTION,
