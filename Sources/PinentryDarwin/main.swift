@@ -43,6 +43,21 @@ private func installSignalHandlers() {
     signal(SIGTERM, terminator)
     signal(SIGHUP, terminator)
     signal(SIGINT, terminator)
+
+    // Surface uncaught NSExceptions on stderr before AppKit converts
+    // them to SIGTRAP and kills us. AppKit's default behaviour is to
+    // crash silently from a constraint-update path, which makes
+    // diagnosis impossible from a release binary.
+    NSSetUncaughtExceptionHandler { exc in
+        var msg = "pinentry-darwin: uncaught NSException: "
+        msg += exc.name.rawValue
+        if let reason = exc.reason { msg += ": \(reason)" }
+        msg += "\n"
+        for frame in exc.callStackSymbols { msg += "  \(frame)\n" }
+        if let data = msg.data(using: .utf8) {
+            try? FileHandle.standardError.write(contentsOf: data)
+        }
+    }
 }
 
 // MARK: - Bootstrap
