@@ -220,14 +220,24 @@ public actor Session {
                 throw SessionError.malformedLine("line exceeds \(LineCodec.maxLineLength) bytes")
             }
 
-            // Read more. We use the throwing `read(upToCount:)` API so we
-            // can distinguish EOF (`nil` or empty Data) from genuine errors.
-            let chunk: Data?
-            do {
-                chunk = try input.read(upToCount: 4096)
-            } catch {
+            // Read more. Foundation's `FileHandle.read(upToCount:)` on a
+            // pipe loops internally until the buffer is full or EOF arrives,
+            // which deadlocks any line-oriented protocol where the peer
+            // sends short bursts and then waits for our reply. Drop down to
+            // the raw `read(2)` syscall so one call returns whatever the
+            // pipe currently has buffered.
+            let bufCap = 4096
+            var readData = Data(count: bufCap)
+            let nRead = readData.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Int in
+                guard let base = ptr.baseAddress else { return -1 }
+                return Darwin.read(input.fileDescriptor,
+                                   base.assumingMemoryBound(to: UInt8.self),
+                                   bufCap)
+            }
+            if nRead < 0 {
                 throw SessionError.ioError(errno: errno)
             }
+            let chunk: Data? = nRead == 0 ? nil : readData.prefix(nRead)
             guard let data = chunk, !data.isEmpty else {
                 // EOF.
                 if readBuffer.isEmpty {
