@@ -76,6 +76,11 @@ let package = Package(
             dependencies: ["KeychainStore", "SecureMemory"],
             path: "Tests/KeychainStoreTests"
         ),
+        .testTarget(
+            name: "PinentryUITests",
+            dependencies: ["PinentryUI", "SecureMemory"],
+            path: "Tests/PinentryUITests"
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
