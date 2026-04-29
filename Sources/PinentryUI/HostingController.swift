@@ -32,24 +32,17 @@ public func makePinentryWindow<V: View>(rootView: V, title: String?) -> NSWindow
     if let title { window.title = title }
 
     let hosting = NSHostingController(rootView: rootView)
+    // Setting `contentViewController` automatically wires the hosting
+    // view to track the window's content size via autoresizing. We let
+    // SwiftUI report its intrinsic height through `fittingSize` and
+    // resize the window to match — no manual constraints needed.
     window.contentViewController = hosting
 
-    // Constrain width; let height float to the SwiftUI body's intrinsic.
-    if let view = hosting.view as NSView? {
-        view.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            view.widthAnchor.constraint(equalToConstant: PinentryWindow.preferredWidth)
-        ])
-    }
-
-    // Resize to fit the hosting controller's preferred content size.
-    let fitted = hosting.view.fittingSize
-    let frame = NSRect(
-        x: 0, y: 0,
+    let targetHeight = max(hosting.view.fittingSize.height, 120)
+    window.setContentSize(NSSize(
         width: PinentryWindow.preferredWidth,
-        height: max(fitted.height, 120)
-    )
-    window.setContentSize(frame.size)
+        height: targetHeight
+    ))
 
     return window
 }

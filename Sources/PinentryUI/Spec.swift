@@ -114,9 +114,12 @@ public struct DialogSpec: Sendable {
     }
 
     /// The prompt label preferring the explicit SET value, falling back to
-    /// the localised default, falling back to "Passphrase:".
+    /// the localised default, falling back to "Passphrase:". An explicit
+    /// SETPROMPT with an empty argument falls through to `defaults.prompt`
+    /// rather than rendering a blank label.
     public var resolvedPrompt: String {
-        prompt ?? defaults.prompt
+        if let p = prompt, !p.isEmpty { return p }
+        return defaults.prompt
     }
 }
 

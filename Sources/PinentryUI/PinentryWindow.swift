@@ -37,6 +37,15 @@ public final class PinentryWindow: NSWindow {
             defer: false
         )
 
+        // CRITICAL: NSWindow's designated initializer defaults
+        // `isReleasedWhenClosed` to true, which double-frees a Swift-owned
+        // NSWindow under ARC (AppKit autoreleases on close *and* ARC
+        // releases on the last Swift reference dropping). The result is a
+        // use-after-free during the first layout/constraint pass — the
+        // very symptom we hit on GETPIN. Mirror pinentry-mac's
+        // `releasedWhenClosed="NO"` and let Swift own the lifetime.
+        isReleasedWhenClosed = false
+
         // Titlebar: transparent + invisible title so the visual-effect
         // background bleeds all the way to the top edge.
         titlebarAppearsTransparent = true
