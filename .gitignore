@@ -1,0 +1,35 @@
+# Local-only Claude instructions (never commit) — global policy
+CLAUDE.md
+
+# No Markdown in source control except README.md — global policy
+*.md
+!README.md
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+
+# Build artefacts
+build/
+dist/*
+!dist/homebrew/
+*.app
+*.pkg
+*.dmg
+*.tar.gz
+*.zip
+
+# macOS cruft
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / tooling
+.idea/
+.vscode/
+*.swp
+*~

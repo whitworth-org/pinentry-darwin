@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+    Hardened-runtime entitlements for pinentry-darwin.
+
+    NOTE: We deliberately do NOT include `com.apple.security.app-sandbox`.
+    pinentry-darwin is fork-exec'd by gpg-agent and communicates over inherited
+    stdin/stdout pipes. The macOS App Sandbox blocks that stdio inheritance,
+    which would break the Assuan protocol entirely. Hardened runtime alone is
+    sufficient for Developer ID notarization.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <false/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <false/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <false/>
+</dict>
+</plist>
