@@ -87,7 +87,12 @@ build:
 	install -d $(APP_CONTENTS)
 	cp $(RELEASE_BIN) $(APP_MACOS)/$(APP_NAME)
 	cp $(INFO_PLIST) $(APP_CONTENTS)/Info.plist
-	cp $(ENTITLEMENTS) $(APP_CONTENTS)/$(APP_NAME).entitlements
+	# NOTE: entitlements file is NOT bundled. It's an INPUT to `codesign`
+	# (passed via --entitlements), not a runtime resource. Putting it inside
+	# Contents/ makes codesign treat it as an unsigned subcomponent and fail
+	# the sign step. Source-of-truth lives at $(ENTITLEMENTS); audit reads
+	# the embedded entitlements from the signed binary, falling back to the
+	# source file for unsigned dev builds.
 	@echo "Bundled $(APP_BUNDLE)"
 
 test:
