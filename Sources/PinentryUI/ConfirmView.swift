@@ -61,28 +61,24 @@ public struct ConfirmView: View {
                         onResult(.confirmed)
                     }
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(PrimaryButtonStyle())
                 } else {
                     Button(spec.resolvedCancel) {
                         onResult(.canceled)
                     }
                     .keyboardShortcut(.cancelAction)
-                    .controlSize(.large)
 
                     if let notOK = spec.notOKLabel, !notOK.isEmpty {
                         Button(notOK) {
                             onResult(.notConfirmed)
                         }
-                        .controlSize(.large)
                     }
 
                     Button(spec.resolvedOK) {
                         onResult(.confirmed)
                     }
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
+                    .buttonStyle(PrimaryButtonStyle())
                 }
             }
         }

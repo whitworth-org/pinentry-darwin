@@ -58,14 +58,14 @@ public struct PinView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: Theme.blockPadding) {
+        VStack(alignment: .leading, spacing: Theme.mediumPadding) {
             headerBlock
             inputBlock
             optionsBlock
             buttonRow
         }
         .padding(.horizontal, Theme.largePadding)
-        .padding(.vertical, Theme.blockPadding)
+        .padding(.vertical, Theme.mediumPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : Theme.entranceTranslate)
@@ -78,17 +78,18 @@ public struct PinView: View {
                 skeActive = true
             }
 
-            // Initialize showTyping from the model (settings preference)
-            // and seed focus to the first input.
+            // Initialize showTyping from the model (settings preference).
             revealTyping = model.showTyping
+
+            // Seed focus synchronously. SwiftUI defers @FocusState
+            // application until after the view tree is committed, so
+            // setting it in onAppear's body is sufficient — no Task
+            // delay needed (the previous async sleep was racy and
+            // sometimes left the field unfocused).
+            focusedField = .pin
+
             withAnimation(.easeOut(duration: Theme.entranceDuration)) {
                 appeared = true
-            }
-            // Focus after a tick so the entrance animation has begun and
-            // SecureField has its responder chain set up.
-            Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 60_000_000)
-                focusedField = .pin
             }
         }
         .onDisappear {
@@ -110,32 +111,34 @@ public struct PinView: View {
 
     // MARK: - Sub-blocks
 
-    /// Top: SF Symbol anchor + title + description + (optional) error +
-    /// (optional) key-info fingerprint, separated from the input cluster
-    /// by a hairline divider.
+    /// Top: icon + title side-by-side, with description and (optional)
+    /// fingerprint stacked below. Horizontal icon-title pairing saves
+    /// ~32pt of vertical space versus the previous stacked layout while
+    /// still giving the dialog a clear iconographic anchor.
     @ViewBuilder
     private var headerBlock: some View {
-        VStack(alignment: .leading, spacing: Theme.mediumPadding) {
+        VStack(alignment: .leading, spacing: Theme.smallPadding) {
 
-            // SF Symbol anchor — gives the dialog instant identity.
-            Image(systemName: "lock.shield.fill")
-                .font(.system(size: Theme.headerIconSize, weight: .semibold))
-                .foregroundStyle(Theme.accent)
-                .accessibilityHidden(true)
+            HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding + 2) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: Theme.headerIconSize, weight: .semibold))
+                    .foregroundStyle(Theme.accent)
+                    .accessibilityHidden(true)
 
-            // SETERROR text, if any. Lives above the title because it's
-            // the most urgent thing on screen when present.
+                if let title = spec.title, !title.isEmpty {
+                    Text(title)
+                        .font(Theme.titleFont)
+                        .foregroundStyle(Color.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            // SETERROR text, if any. The most urgent thing on screen
+            // when present, so we keep it adjacent to the title.
             if let err = spec.error, !err.isEmpty {
                 Text(err)
                     .font(Theme.bodyFont)
                     .foregroundStyle(Theme.errorText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if let title = spec.title, !title.isEmpty {
-                Text(title)
-                    .font(Theme.titleFont)
-                    .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -147,15 +150,49 @@ public struct PinView: View {
             }
 
             if case let .key(mode, fpr) = spec.keyInfo {
-                Text("\(String(mode))/\(fpr)")
+                let label = formatKeyInfoLabel(mode: mode, fingerprint: fpr)
+                Text(label)
                     .font(Theme.monospacedFont)
                     .foregroundStyle(Color.secondary)
                     .textSelection(.enabled)
                     .accessibilityLabel(Text("Key fingerprint \(fpr)"))
+                    .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
 
-            Divider()
-                .overlay(Theme.hairline)
+    /// Format a SETKEYINFO mode + fingerprint into a humane label.
+    /// Conventions:
+    ///   - 40-hex-char SHA-1 fingerprints render as
+    ///     `1EA9 3FE7 B663 8F3C 6B6E  9C5C 2ABD 2764 D9D7 175C`
+    ///     (groups of four with a double space at the midpoint — the
+    ///     canonical `gpg --fingerprint` output style).
+    ///   - Mode 'c' (card-resident key) prefixes "Card key:".
+    ///   - Other modes ('n' normal, 's' ssh, 'o' obsolete) render
+    ///     without prefix; the fingerprint is identifying enough.
+    ///   - Non-40-char fingerprints (e.g. shorter long-key-IDs) pass
+    ///     through unformatted.
+    private func formatKeyInfoLabel(mode: Character, fingerprint fpr: String) -> String {
+        let formatted: String
+        let hex = fpr.uppercased()
+        if hex.count == 40, hex.allSatisfy(\.isHexDigit) {
+            // Build groups of 4 with double space between groups 5 and 6.
+            var pieces: [String] = []
+            for chunkStart in stride(from: 0, to: 40, by: 4) {
+                let lo = hex.index(hex.startIndex, offsetBy: chunkStart)
+                let hi = hex.index(lo, offsetBy: 4)
+                pieces.append(String(hex[lo..<hi]))
+            }
+            let firstHalf = pieces.prefix(5).joined(separator: " ")
+            let secondHalf = pieces.suffix(5).joined(separator: " ")
+            formatted = "\(firstHalf)  \(secondHalf)"
+        } else {
+            formatted = fpr
+        }
+        switch mode {
+        case "c": return "Card key:  \(formatted)"
+        case "s": return "SSH key:   \(formatted)"
+        default:  return formatted
         }
     }
 
@@ -247,19 +284,21 @@ public struct PinView: View {
                 }
             }
             .keyboardShortcut(.defaultAction)
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
+            .buttonStyle(PrimaryButtonStyle())
             .disabled(!model.canSubmit || model.isSubmitting)
+            .opacity(model.canSubmit && !model.isSubmitting ? 1.0 : 0.45)
         }
     }
 
     // MARK: - In-field eye toggle
 
-    /// A SecureField/TextField with a trailing eye button rendered as if
-    /// it lives INSIDE the same input chrome. We synthesise the rounded
-    /// border ourselves rather than fighting `.textFieldStyle(.roundedBorder)`,
-    /// because there's no SwiftUI surface to overlay content into a styled
-    /// text field on macOS without breaking its layout.
+    /// SecureField (or TextField when revealed) using the canonical macOS
+    /// rounded-border style for guaranteed input handling, plus an eye
+    /// button beside it. The previous in-field-eye attempt with
+    /// `.textFieldStyle(.plain)` rendered correctly but suffered from a
+    /// known macOS SwiftUI quirk where SecureField + plain style doesn't
+    /// reliably gain firstResponder, so typing was ignored. Standard
+    /// rounded-border styling avoids that whole bug class.
     @ViewBuilder
     private func pinField(
         binding: Binding<String>,
@@ -267,49 +306,39 @@ public struct PinView: View {
         accessibilityLabel: String,
         focus: PinField
     ) -> some View {
-        HStack(spacing: 0) {
-            Group {
-                if revealTyping {
-                    TextField("", text: binding)
-                } else {
-                    SecureField("", text: binding)
-                }
+        HStack(spacing: Theme.smallPadding) {
+            if revealTyping {
+                TextField("", text: binding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(Theme.inputFont)
+                    .focused($focusedField, equals: focus)
+                    .accessibilityLabel(Text(accessibilityLabel))
+            } else {
+                SecureField("", text: binding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(Theme.inputFont)
+                    .focused($focusedField, equals: focus)
+                    .accessibilityLabel(Text(accessibilityLabel))
             }
-            .textFieldStyle(.plain)
-            .font(Theme.inputFont)
-            .focused($focusedField, equals: focus)
-            .onChange(of: binding.wrappedValue) { _, newValue in
-                onChange(newValue)
-            }
-            .accessibilityLabel(Text(accessibilityLabel))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
 
             Button {
                 revealTyping.toggle()
+                // Keep focus on the field after the toggle so the next
+                // keystroke still lands in the input rather than the button.
+                focusedField = focus
             } label: {
                 Image(systemName: revealTyping ? "eye.slash" : "eye")
                     .font(.system(size: Theme.inlineIconSize))
                     .foregroundStyle(Color.secondary)
-                    .frame(width: 20, height: 20)
+                    .frame(width: 22, height: 22)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .padding(.trailing, 8)
             .help(revealTyping ? "Hide typing" : "Show typing")
             .accessibilityLabel(Text(revealTyping ? "Hide passphrase" : "Show passphrase"))
         }
-        .background(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color(NSColor.textBackgroundColor))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .strokeBorder(
-                    focusedField == focus ? Theme.accent.opacity(0.7) : Theme.hairline,
-                    lineWidth: focusedField == focus ? 2 : 1
-                )
-        )
-        .animation(.easeInOut(duration: 0.12), value: focusedField)
+        .onChange(of: binding.wrappedValue) { _, newValue in
+            onChange(newValue)
+        }
     }
 }

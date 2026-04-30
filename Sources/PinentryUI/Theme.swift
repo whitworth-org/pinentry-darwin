@@ -123,3 +123,35 @@ public enum Theme {
         Color.secondary.opacity(0.18)
     }
 }
+
+// MARK: - Primary button style
+//
+// `.borderedProminent` renders a slightly desaturated accent in Dark
+// mode for visual hierarchy reasons. We want the dialog's primary
+// action to match the SF Symbol header icon's pure accent — when the
+// passphrase field has content and OK becomes enabled, the colour
+// should read as "this is THE action to take".
+//
+// PrimaryButtonStyle solid-fills with `Theme.accent` (the same colour
+// as `controlAccentColor` driving the icon), uses `.white` text for
+// guaranteed contrast on any accent hue the user may have picked, and
+// dims subtly while held. Shape and padding mirror the standard macOS
+// button so it sits next to the system-styled Cancel button without
+// looking out of place.
+
+public struct PrimaryButtonStyle: ButtonStyle {
+    public init() {}
+
+    public func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.white)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Theme.accent.opacity(configuration.isPressed ? 0.78 : 1.0))
+            )
+            .contentShape(Rectangle())
+    }
+}

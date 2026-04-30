@@ -57,6 +57,12 @@ public final class PinViewModel {
     /// Mismatch flag, recomputed on every change.
     public var pinsMatch: Bool = true
 
+    /// Whether the spec asked for a repeat-passphrase confirmation. When
+    /// false, `pinsMatch` is held true regardless of the repeat buffer
+    /// (which won't be filled by the UI) so a normal GETPIN can submit
+    /// the moment the user types one character.
+    private let repeatRequired: Bool
+
     /// True between `submit()` being invoked and the coordinator's result
     /// callback returning. Drives a `ProgressView` on the OK button so
     /// users get visual feedback their click registered. Today the flow
@@ -84,8 +90,9 @@ public final class PinViewModel {
         self.showTyping = showTypingByDefault
         self.saveToKeychain = spec.allowKeychainSave && saveByDefault
         self.onResult = onResult
+        self.repeatRequired = (spec.repeatPrompt != nil)
         // No repeat field present means "match" is implicitly true.
-        self.pinsMatch = (spec.repeatPrompt == nil)
+        self.pinsMatch = !self.repeatRequired
     }
 
     // MARK: - Input
@@ -144,6 +151,12 @@ public final class PinViewModel {
     // MARK: - Private helpers
 
     private func recomputeMatch() {
+        // If the spec didn't ask for a repeat field, match is implicit.
+        // Otherwise the buffers must be the same length and content.
+        guard repeatRequired else {
+            pinsMatch = true
+            return
+        }
         if repeatPin.count == 0 && pin.count == 0 {
             pinsMatch = true
             return

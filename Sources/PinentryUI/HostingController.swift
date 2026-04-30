@@ -27,8 +27,13 @@ public func makePinentryWindow<V: View>(rootView: V, title: String?) -> NSWindow
     // room; laptop screens stay compact.
     let preferredWidth = PinentryWindow.preferredWidth()
 
-    // Initial frame — height is a placeholder; SwiftUI will request its
-    // intrinsic size and we resize the window once below.
+    // Initial frame — width is final, height is placeholder. The
+    // SwiftUI tree's `.frame(width:)` modifier pins the width, and
+    // assigning the hosting controller as `contentViewController`
+    // makes the window track its `preferredContentSize` automatically
+    // (default behaviour on macOS 14+). No explicit sizingOptions and
+    // no manual `setContentSize` — both of those caused Auto Layout
+    // update-cycle exceptions in earlier iterations.
     let initialRect = NSRect(
         x: 0, y: 0,
         width: preferredWidth, height: 200
@@ -36,18 +41,9 @@ public func makePinentryWindow<V: View>(rootView: V, title: String?) -> NSWindow
     let window = PinentryWindow(contentRect: initialRect)
     if let title { window.title = title }
 
-    let hosting = NSHostingController(rootView: rootView)
-    // Setting `contentViewController` automatically wires the hosting
-    // view to track the window's content size via autoresizing. We let
-    // SwiftUI report its intrinsic height through `fittingSize` and
-    // resize the window to match — no manual constraints needed.
+    let constrained = rootView.frame(width: preferredWidth)
+    let hosting = NSHostingController(rootView: constrained)
     window.contentViewController = hosting
-
-    let targetHeight = max(hosting.view.fittingSize.height, 120)
-    window.setContentSize(NSSize(
-        width: preferredWidth,
-        height: targetHeight
-    ))
 
     return window
 }

@@ -35,11 +35,21 @@ public final class PinentryWindow: NSWindow {
     private static let screenFraction: CGFloat = 0.34
 
     /// Width of the next pinentry dialog, computed against the supplied
-    /// screen (or `NSScreen.main`). Always lands in `[minWidth, maxWidth]`.
+    /// screen (or `NSScreen.main`). Always lands in `[minWidth, maxWidth]`,
+    /// rounded to the nearest even integer so the result lands on a
+    /// whole-pixel boundary at @2x and avoids half-pixel layout artefacts.
     public static func preferredWidth(for screen: NSScreen? = NSScreen.main) -> CGFloat {
         let visible = (screen ?? NSScreen.screens.first)?.visibleFrame.width ?? 1440
         let raw = visible * screenFraction
-        return min(max(raw, minWidth), maxWidth)
+        let clamped = min(max(raw, minWidth), maxWidth)
+        return roundToEven(clamped)
+    }
+
+    /// Round to the nearest even integer (Banker's rounding for ties).
+    private static func roundToEven(_ value: CGFloat) -> CGFloat {
+        let rounded = value.rounded()
+        let asInt = Int(rounded)
+        return CGFloat(asInt.isMultiple(of: 2) ? asInt : asInt + 1)
     }
 
     /// Closure invoked when the user clicks the red close button. Set by
@@ -92,15 +102,16 @@ public final class PinentryWindow: NSWindow {
         // changes propagate live. The Settings appearance override is
         // applied at the SwiftUI hosting view level instead.
 
-        // Background: an NSVisualEffectView with the under-window
-        // material. This is the same material Ghostty uses for terminal
-        // windows and adapts automatically to Light / Dark.
-        let effect = NSVisualEffectView()
-        effect.material = .underWindowBackground
-        effect.blendingMode = .behindWindow
-        effect.state = .active
-        effect.autoresizingMask = [.width, .height]
-        contentView = effect
+        // Background tint that adapts to system appearance. We do NOT
+        // assign an NSVisualEffectView as contentView here: the caller
+        // sets contentViewController = NSHostingController(...), which
+        // replaces contentView and breaks the visual-effect's
+        // autoresizing model, causing an Auto Layout update-cycle
+        // exception under SwiftUI's constraint-based layout. Solid
+        // windowBackgroundColor reads correctly in both Light and Dark
+        // modes; layered translucency can return in v1.1 via
+        // NSViewRepresentable wrapped inside the SwiftUI tree.
+        backgroundColor = .windowBackgroundColor
     }
 
     // The window must be able to become key so SecureField receives

@@ -52,8 +52,7 @@ public struct MessageView: View {
                     onResult(.confirmed)
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
+                .buttonStyle(PrimaryButtonStyle())
             }
         }
         .padding(.horizontal, Theme.largePadding)
