@@ -232,9 +232,15 @@ final class AssuanLoop {
                 handleClearPassphrase(keyInfo)
                 await reply(.ok)
 
-            case .unknown(let verb, _):
+            case .unknown:
+                // Don't echo the verb back: the parser already strips
+                // LF (Session.readLine) but the verb can still carry
+                // NUL/BEL/ESC and arbitrary UTF-8 bytes that survived
+                // String validation. A constant body keeps log
+                // consumers safe and removes a small reconnaissance
+                // gadget for hostile parents.
                 await reply(.err(code: AssuanError.general,
-                                 message: "Unknown command: \(verb)"))
+                                 message: "Unknown command"))
             }
         }
     }
