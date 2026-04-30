@@ -142,8 +142,9 @@ if [ -x "$BIN" ]; then
     if ! codesign -dv "$APP_BUNDLE" >/dev/null 2>&1; then
         fail "codesign verification failed (no signature)"
     else
-        cs_dump="$(codesign -dv "$APP_BUNDLE" 2>&1)"
-        sig_kind="$(echo "$cs_dump" | awk -F= '/^Signature=/ {print $2}')"
+        # Use --verbose=2 so Authority= lines are emitted. Plain `codesign -dv`
+        # is too terse and omits the chain we need to inspect.
+        cs_dump="$(codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1)"
         cs_flags="$(echo "$cs_dump" | awk -F= '/^CodeDirectory v=/ {print $0}' | sed -E 's/.*flags=([^ ]*).*/\1/')"
 
         # Hardened runtime check: notarization requires the runtime flag to be
@@ -161,8 +162,16 @@ if [ -x "$BIN" ]; then
         esac
 
         if [ "$RELEASE_MODE" -eq 1 ]; then
-            if ! codesign -dv --requirements - "$APP_BUNDLE" 2>&1 | grep -qF "Developer ID"; then
-                fail "release mode requires Developer ID signature; got '$sig_kind'"
+            # The leaf Authority for a Developer ID-signed bundle is literally
+            # "Developer ID Application: <name> (<team>)". Grepping the
+            # Authority chain is more reliable than parsing --requirements,
+            # which renders as OIDs ("certificate leaf[field.1.2.840.…]").
+            if ! echo "$cs_dump" | grep -qE '^Authority=Developer ID Application:'; then
+                fail "release mode requires Developer ID Application signature"
+            fi
+            # Secure timestamp is mandatory for notarization.
+            if ! echo "$cs_dump" | grep -q '^Timestamp='; then
+                fail "release mode requires --timestamp signature (notarytool will reject without)"
             fi
             if ! xcrun stapler validate "$APP_BUNDLE" >/dev/null 2>&1; then
                 fail "release mode requires stapled notarization"
