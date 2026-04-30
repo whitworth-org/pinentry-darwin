@@ -178,13 +178,20 @@ public final class PinViewModel {
     }
 
     private static func copy(string value: String, into buffer: SecureBytes) {
+        // Walk `value.utf8` directly into the SecureBytes. The previous
+        // `Array(value.utf8)` materialised the bytes in regular Swift
+        // heap (Array<UInt8> has no deinit-zero) — a second unwiped
+        // copy in addition to the SwiftUI text-storage residue
+        // documented at the top of this file. Iterating the UTF8View
+        // is allocation-free; the only extra storage is what the
+        // SecureBytes owns.
         buffer.reset()
-        let utf8 = Array(value.utf8)
-        let n = min(utf8.count, buffer.capacity)
-        if n == 0 { return }
-        utf8.withUnsafeBufferPointer { full in
-            let prefix = UnsafeBufferPointer(start: full.baseAddress, count: n)
-            buffer.append(contentsOf: prefix)
+        let cap = buffer.capacity
+        var written = 0
+        for byte in value.utf8 {
+            if written >= cap { break }
+            buffer.append(byte)
+            written += 1
         }
     }
 }
