@@ -114,9 +114,19 @@ public struct PinView: View {
     private var contentColumn: some View {
         VStack(alignment: .leading, spacing: Theme.smallPadding) {
 
-            // Title (SETTITLE) — primary heading.
+            // Title (SETTITLE) — primary heading. Text(verbatim:) is
+            // load-bearing: the spec.* strings are attacker-controlled
+            // (they come from gpg-agent SET* lines). Plain Text("…")
+            // for a runtime String already resolves to the
+            // String overload and renders verbatim today, but a
+            // future refactor that introduces literal interpolation
+            // (e.g. Text("Title: \(title)")) flips to the
+            // LocalizedStringKey overload, which interprets markdown
+            // and link syntax in the interpolated value. The
+            // verbatim init makes the safe contract explicit and
+            // unfailable.
             if let title = spec.title, !title.isEmpty {
-                Text(title)
+                Text(verbatim: title)
                     .font(Theme.titleFont)
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -125,7 +135,7 @@ public struct PinView: View {
             // SETERROR text, if any. Most urgent thing on screen when
             // present, kept adjacent to the title.
             if let err = spec.error, !err.isEmpty {
-                Text(err)
+                Text(verbatim: err)
                     .font(Theme.bodyFont)
                     .foregroundStyle(Theme.errorText)
                     .fixedSize(horizontal: false, vertical: true)
@@ -137,7 +147,7 @@ public struct PinView: View {
             // rich smartcard context shows up the same way pinentry-mac
             // displays it.
             if let desc = spec.description, !desc.isEmpty {
-                Text(desc)
+                Text(verbatim: desc)
                     .font(Theme.bodyFont)
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -147,11 +157,11 @@ public struct PinView: View {
             // SETKEYINFO fingerprint, when supplied (non-card flows).
             // Rendered monospace so users can compare hex digit-for-digit.
             if case let .key(mode, fpr) = spec.keyInfo {
-                Text(formatKeyInfoLabel(mode: mode, fingerprint: fpr))
+                Text(verbatim: formatKeyInfoLabel(mode: mode, fingerprint: fpr))
                     .font(Theme.monospacedFont)
                     .foregroundStyle(Color.secondary)
                     .textSelection(.enabled)
-                    .accessibilityLabel(Text("Key fingerprint \(fpr)"))
+                    .accessibilityLabel(Text(verbatim: "Key fingerprint \(fpr)"))
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -164,7 +174,7 @@ public struct PinView: View {
                 repeatRow(label: repeatPrompt)
 
                 if !model.pinsMatch && model.repeatLength > 0 {
-                    Text(spec.repeatError ?? "Passphrases do not match.")
+                    Text(verbatim: spec.repeatError ?? "Passphrases do not match.")
                         .font(Theme.captionFont)
                         .foregroundStyle(Theme.errorText)
                         .padding(.leading, Theme.fieldLabelColumnWidth + Theme.smallPadding)
@@ -220,7 +230,7 @@ public struct PinView: View {
     @ViewBuilder
     private var inputRow: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding) {
-            Text(spec.resolvedPrompt)
+            Text(verbatim: spec.resolvedPrompt)
                 .font(Theme.bodyFont)
                 .foregroundStyle(Color.primary)
                 .frame(width: Theme.fieldLabelColumnWidth, alignment: .trailing)
@@ -238,7 +248,7 @@ public struct PinView: View {
     @ViewBuilder
     private func repeatRow(label: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding) {
-            Text(label)
+            Text(verbatim: label)
                 .font(Theme.bodyFont)
                 .foregroundStyle(Color.primary)
                 .frame(width: Theme.fieldLabelColumnWidth, alignment: .trailing)
@@ -300,10 +310,10 @@ public struct PinView: View {
                         ProgressView()
                             .controlSize(.small)
                             .progressViewStyle(.circular)
-                        Text(spec.resolvedOK)
+                        Text(verbatim: spec.resolvedOK)
                     }
                 } else {
-                    Text(spec.resolvedOK)
+                    Text(verbatim: spec.resolvedOK)
                 }
             }
             .keyboardShortcut(.defaultAction)
@@ -331,13 +341,13 @@ public struct PinView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(Theme.inputFont)
                     .focused($focusedField, equals: focus)
-                    .accessibilityLabel(Text(accessibilityLabel))
+                    .accessibilityLabel(Text(verbatim: accessibilityLabel))
             } else {
                 SecureField("", text: binding)
                     .textFieldStyle(.roundedBorder)
                     .font(Theme.inputFont)
                     .focused($focusedField, equals: focus)
-                    .accessibilityLabel(Text(accessibilityLabel))
+                    .accessibilityLabel(Text(verbatim: accessibilityLabel))
             }
         }
         .onChange(of: binding.wrappedValue) { _, newValue in

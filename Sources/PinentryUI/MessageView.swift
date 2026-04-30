@@ -30,15 +30,20 @@ public struct MessageView: View {
                     .foregroundStyle(Theme.accent)
                     .accessibilityHidden(true)
 
+                // Text(verbatim:): the spec.* strings are
+                // attacker-controlled. See PinView for full
+                // rationale; the short version is that this forces
+                // the String overload and forecloses future
+                // markdown/link interpretation regressions.
                 if let title = spec.title, !title.isEmpty {
-                    Text(title)
+                    Text(verbatim: title)
                         .font(Theme.titleFont)
                         .foregroundStyle(Color.primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if let desc = spec.description, !desc.isEmpty {
-                    Text(desc)
+                    Text(verbatim: desc)
                         .font(Theme.bodyFont)
                         .foregroundStyle(Color.primary)
                         .fixedSize(horizontal: false, vertical: true)

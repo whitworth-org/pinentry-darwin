@@ -31,22 +31,28 @@ public struct ConfirmView: View {
                     .foregroundStyle(Theme.accent)
                     .accessibilityHidden(true)
 
+                // Text(verbatim:): the spec.* strings are
+                // attacker-controlled (from gpg-agent SET* lines).
+                // The verbatim init forces the String overload of
+                // Text and prevents any future literal-with-
+                // interpolation refactor from accidentally flipping
+                // to LocalizedStringKey + markdown interpretation.
                 if let err = spec.error, !err.isEmpty {
-                    Text(err)
+                    Text(verbatim: err)
                         .font(Theme.bodyFont)
                         .foregroundStyle(Theme.errorText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if let title = spec.title, !title.isEmpty {
-                    Text(title)
+                    Text(verbatim: title)
                         .font(Theme.titleFont)
                         .foregroundStyle(Color.primary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
                 if let desc = spec.description, !desc.isEmpty {
-                    Text(desc)
+                    Text(verbatim: desc)
                         .font(Theme.bodyFont)
                         .foregroundStyle(Color.primary)
                         .fixedSize(horizontal: false, vertical: true)
