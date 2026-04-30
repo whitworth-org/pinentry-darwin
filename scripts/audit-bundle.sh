@@ -119,20 +119,71 @@ else
 fi
 
 if [ -n "$ENT_FILE" ]; then
-    # The app-sandbox entitlement MUST be absent — it breaks stdio inheritance
-    # from gpg-agent, which is the entire point of pinentry-darwin.
-    if plutil -extract com.apple.security.app-sandbox raw -- "$ENT_FILE" 2>/dev/null | grep -qE '^(true|YES|1)$'; then
-        fail "app-sandbox entitlement present — must be absent (breaks gpg-agent stdio)"
+    # plutil -extract uses '.' as a key-path separator, so any key that
+    # itself contains '.' (which every Apple entitlement key does) must
+    # be escaped backslash-by-dot. This shell helper does that
+    # mechanically and routes the extracted value (or "absent") to
+    # stdout, swallowing the error noise plutil emits when the key is
+    # missing.
+    extract_ent() {
+        # $1 = entitlement key (with literal dots)
+        local escaped
+        escaped="${1//./\\.}"
+        plutil -extract "$escaped" raw -- "$ENT_FILE" 2>/dev/null || echo absent
+    }
+
+    # The app-sandbox entitlement MUST be absent — it breaks stdio
+    # inheritance from gpg-agent, which is the entire point of
+    # pinentry-darwin.
+    sandbox_v="$(extract_ent com.apple.security.app-sandbox)"
+    case "$sandbox_v" in
+        true|1|YES)
+            fail "app-sandbox entitlement present — must be absent (breaks gpg-agent stdio)" ;;
+    esac
+
+    # Required for release: get-task-allow must be present and false.
+    # task_for_pid() against a running pinentry-darwin is the principal
+    # way a same-user attacker would attach a debugger and walk
+    # SecureBytes pages live; explicit false closes that window. Notary
+    # rejects true, but absence leaves the value implicit and
+    # build-pipeline-dependent.
+    if [ "$RELEASE_MODE" -eq 1 ]; then
+        gta="$(extract_ent com.apple.security.get-task-allow)"
+        case "$gta" in
+            false|0|NO) ;;
+            *) fail "release requires com.apple.security.get-task-allow=false (got '$gta')" ;;
+        esac
     fi
 
-    # The hardened-runtime weakening flags MUST be absent; if they're set
-    # we lose the security promise of the hardened runtime.
-    for weak in com.apple.security.cs.allow-jit \
-                com.apple.security.cs.allow-unsigned-executable-memory \
-                com.apple.security.cs.disable-library-validation; do
-        if plutil -extract "$weak" raw -- "$ENT_FILE" 2>/dev/null | grep -qE '^(true|YES|1)$'; then
-            fail "weakening entitlement set: $weak"
-        fi
+    # Forbidden: any of these set to true is a hard fail. The first
+    # block re-enables an attack vector closed by the hardened runtime
+    # (library injection, RWX pages, debugger attach, dyld env). The
+    # second block is resource-access entitlements pinentry must never
+    # need (no network, no devices, no PII, no AppleEvents).
+    for forbidden in \
+        com.apple.security.cs.allow-jit \
+        com.apple.security.cs.allow-unsigned-executable-memory \
+        com.apple.security.cs.disable-library-validation \
+        com.apple.security.cs.allow-dyld-environment-variables \
+        com.apple.security.cs.disable-executable-page-protection \
+        com.apple.security.cs.debugger \
+        com.apple.security.cs.allow-relative-library-loads \
+        com.apple.security.network.client \
+        com.apple.security.network.server \
+        com.apple.security.device.camera \
+        com.apple.security.device.microphone \
+        com.apple.security.device.usb \
+        com.apple.security.device.audio-input \
+        com.apple.security.personal-information.contacts \
+        com.apple.security.personal-information.photos-library \
+        com.apple.security.personal-information.calendars \
+        com.apple.security.personal-information.reminders \
+        com.apple.security.personal-information.location \
+        com.apple.security.automation.apple-events
+    do
+        case "$(extract_ent "$forbidden")" in
+            true|1|YES) fail "forbidden entitlement set: $forbidden" ;;
+        esac
     done
 fi
 
