@@ -30,19 +30,28 @@ public struct UISettings: Sendable, Codable, Equatable {
     public var defaultTimeout: Int = 0
     public var closeOnBlur: Bool = false
     public var beepOnWeakPassphrase: Bool = false
+    /// Enable Carbon's `EnableSecureEventInput` for the GETPIN dialog so
+    /// other processes cannot observe keystrokes during passphrase
+    /// entry. Default ON: pinentry-darwin's modal exists *only* to
+    /// receive a secret. Power users with accessibility tooling that
+    /// conflicts with SKE can disable. Matches the behaviour Apple's
+    /// Keychain Access prompts use.
+    public var secureKeyboardEntry: Bool = true
 
     public init(
         theme: Theme = .system,
         titlebarStyle: TitlebarStyle = .transparent,
         defaultTimeout: Int = 0,
         closeOnBlur: Bool = false,
-        beepOnWeakPassphrase: Bool = false
+        beepOnWeakPassphrase: Bool = false,
+        secureKeyboardEntry: Bool = true
     ) {
         self.theme = theme
         self.titlebarStyle = titlebarStyle
         self.defaultTimeout = defaultTimeout
         self.closeOnBlur = closeOnBlur
         self.beepOnWeakPassphrase = beepOnWeakPassphrase
+        self.secureKeyboardEntry = secureKeyboardEntry
     }
 }
 

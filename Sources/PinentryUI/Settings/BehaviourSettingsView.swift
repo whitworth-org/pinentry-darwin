@@ -44,6 +44,15 @@ public struct BehaviourSettingsView: View {
                 Toggle("Beep on weak passphrase", isOn: $settings.beepOnWeakPassphrase)
                     .onChange(of: settings.beepOnWeakPassphrase) { _, _ in onChange(settings) }
             }
+
+            Section("Security") {
+                Toggle("Secure keyboard entry", isOn: $settings.secureKeyboardEntry)
+                    .onChange(of: settings.secureKeyboardEntry) { _, _ in onChange(settings) }
+                Text("Routes keystrokes through a privileged path other apps cannot observe. macOS shows a lock badge in the menu bar while active. Disable only if it conflicts with assistive tools.")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .padding(Theme.mediumPadding)
     }

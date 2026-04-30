@@ -20,6 +20,13 @@
 // passphrase. For v1.0.0 this is the documented residual exposure. The
 // `SecureBytes` is the authoritative copy that gets written to the
 // Assuan wire.
+//
+// NOTE: There is no live quality bar. Each keystroke firing
+// INQUIRE QUALITY at gpg-agent would be an additional transient
+// exposure of the candidate bytes (wire → agent → estimator → wire),
+// for the sake of a heuristic score that anchors users on bar-satisfying
+// passphrases over memorable ones. The wire surface (`Session.inquireQuality`)
+// remains in AssuanProtocol for future consumers; we just don't call it.
 
 import Foundation
 import Observation
@@ -42,9 +49,6 @@ public final class PinViewModel {
     public var showTyping: Bool
     public var saveToKeychain: Bool
 
-    /// Quality bar driver. -1.0 (very weak / negative) … +1.0 (strong).
-    public var qualityFraction: Double = 0
-
     /// Length of the typed pin. The View uses this so it can render the
     /// "*"-mask placeholder without re-querying the SecureBytes.
     public var pinLength: Int = 0
@@ -53,15 +57,19 @@ public final class PinViewModel {
     /// Mismatch flag, recomputed on every change.
     public var pinsMatch: Bool = true
 
-    // MARK: - Dependencies
+    /// True between `submit()` being invoked and the coordinator's result
+    /// callback returning. Drives a `ProgressView` on the OK button so
+    /// users get visual feedback their click registered. Today the flow
+    /// is synchronous so this state lasts only the duration of a
+    /// callback hop; the affordance is here so a future async post-submit
+    /// path (e.g. Keychain access taking a moment) doesn't require a UI
+    /// rewrite.
+    public var isSubmitting: Bool = false
 
-    private let qualityProvider: QualityProvider?
+    // MARK: - Dependencies
 
     /// Coordinator-supplied callback. Invoked at most once.
     private var onResult: ((DialogResult) -> Void)?
-
-    /// In-flight quality-debounce task. Cancelled on every new keystroke.
-    private var qualityTask: Task<Void, Never>?
 
     // MARK: - Init
 
@@ -69,14 +77,12 @@ public final class PinViewModel {
         spec: DialogSpec,
         showTypingByDefault: Bool,
         saveByDefault: Bool,
-        qualityProvider: QualityProvider?,
         onResult: @escaping (DialogResult) -> Void
     ) {
         self.pin = SecureBytes(capacity: 1024)
         self.repeatPin = SecureBytes(capacity: 1024)
         self.showTyping = showTypingByDefault
         self.saveToKeychain = spec.allowKeychainSave && saveByDefault
-        self.qualityProvider = qualityProvider
         self.onResult = onResult
         // No repeat field present means "match" is implicitly true.
         self.pinsMatch = (spec.repeatPrompt == nil)
@@ -90,7 +96,6 @@ public final class PinViewModel {
         Self.copy(string: value, into: pin)
         pinLength = pin.count
         recomputeMatch()
-        requestQualityUpdate()
     }
 
     public func setRepeat(from value: String) {
@@ -99,32 +104,12 @@ public final class PinViewModel {
         recomputeMatch()
     }
 
-    // MARK: - Quality
-
-    /// Cancel any pending quality update and schedule a fresh one. The
-    /// debounce window is 250 ms; a continuation that's already had its
-    /// `Task.sleep` cancelled exits silently without calling the provider.
-    public func requestQualityUpdate() {
-        qualityTask?.cancel()
-        guard let provider = qualityProvider, pin.count > 0 else {
-            qualityFraction = 0
-            return
-        }
-        qualityTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
-            if Task.isCancelled { return }
-            guard let self else { return }
-            let raw = await provider.quality(for: self.pin)
-            if Task.isCancelled { return }
-            let clamped = max(-100, min(100, raw))
-            self.qualityFraction = Double(clamped) / 100.0
-        }
-    }
-
     // MARK: - Resolution
 
     /// Hand ownership of `pin` to the coordinator.
     public func submit() {
+        guard !isSubmitting else { return }
+        isSubmitting = true
         deliver(.pin(pin, savedToKeychain: saveToKeychain))
     }
 
@@ -147,7 +132,6 @@ public final class PinViewModel {
     private func deliver(_ result: DialogResult) {
         guard let cb = onResult else { return }
         onResult = nil
-        qualityTask?.cancel()
         cb(result)
     }
 
@@ -192,12 +176,3 @@ public final class PinViewModel {
     }
 }
 
-// MARK: - QualityProvider
-
-/// Closure-style protocol the coordinator implements to bridge
-/// `INQUIRE QUALITY` round-trips through the `Session` actor.
-public protocol QualityProvider: Sendable {
-    /// Score in -100…+100 (gpg-agent convention). Callers may return
-    /// 0 if the agent didn't enable quality reporting.
-    func quality(for candidate: SecureBytes) async -> Int
-}

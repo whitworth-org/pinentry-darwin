@@ -22,11 +22,16 @@ import SwiftUI
 ///   The caller is responsible for `makeKeyAndOrderFront` + `center`.
 @MainActor
 public func makePinentryWindow<V: View>(rootView: V, title: String?) -> NSWindow {
+    // Compute the dialog width once against the active screen so the
+    // dialog scales with display density. 4K/5K hosts get more breathing
+    // room; laptop screens stay compact.
+    let preferredWidth = PinentryWindow.preferredWidth()
+
     // Initial frame — height is a placeholder; SwiftUI will request its
     // intrinsic size and we resize the window once below.
     let initialRect = NSRect(
         x: 0, y: 0,
-        width: PinentryWindow.preferredWidth, height: 200
+        width: preferredWidth, height: 200
     )
     let window = PinentryWindow(contentRect: initialRect)
     if let title { window.title = title }
@@ -40,7 +45,7 @@ public func makePinentryWindow<V: View>(rootView: V, title: String?) -> NSWindow
 
     let targetHeight = max(hosting.view.fittingSize.height, 120)
     window.setContentSize(NSSize(
-        width: PinentryWindow.preferredWidth,
+        width: preferredWidth,
         height: targetHeight
     ))
 

@@ -14,16 +14,13 @@ import SecureMemory
 @MainActor
 public final class PinentryCoordinator {
 
-    private let qualityProvider: QualityProvider?
     private let userPrefs: UserPrefs
     private let uiSettings: UISettings
 
     public init(
-        qualityProvider: QualityProvider?,
         userPrefs: UserPrefs = UserPrefs(),
         uiSettings: UISettings = UISettings()
     ) {
-        self.qualityProvider = qualityProvider
         self.userPrefs = userPrefs
         self.uiSettings = uiSettings
     }
@@ -60,6 +57,12 @@ public final class PinentryCoordinator {
             cont.resume(returning: result)
             window?.close()
             window = nil
+            // Defensive: if SwiftUI's onDisappear didn't fire (rare under
+            // window-close-from-resolve paths), zero out any outstanding
+            // SKE enables so the menu-bar lock doesn't stick around.
+            // This is a no-op when the view's onDisappear already
+            // balanced its own enable.
+            SecureInput.reset()
         }
     }
 
@@ -76,14 +79,17 @@ public final class PinentryCoordinator {
                 spec: spec,
                 showTypingByDefault: userPrefs.showTypingByDefault,
                 saveByDefault: userPrefs.saveByDefault,
-                qualityProvider: qualityProvider,
                 onResult: { [resolver] result in
                     // PinViewModel is @MainActor-isolated, so this closure
                     // is called on the main actor; resolve directly.
                     resolver.resolve(result)
                 }
             )
-            let root = applyTheme(PinView(spec: spec, model: model))
+            let root = applyTheme(PinView(
+                spec: spec,
+                model: model,
+                secureKeyboardEntry: uiSettings.secureKeyboardEntry
+            ))
             window = makePinentryWindow(rootView: root, title: spec.title)
 
         case .confirm:

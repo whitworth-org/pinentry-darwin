@@ -21,8 +21,26 @@ import AppKit
 @MainActor
 public final class PinentryWindow: NSWindow {
 
-    /// Width of every pinentry dialog. Height is driven by the SwiftUI body.
-    public static let preferredWidth: CGFloat = 480
+    /// Lower bound. Below this the dialog feels cramped on any display.
+    public static let minWidth: CGFloat = 480
+
+    /// Upper bound. Above this the dialog feels stretched even on 5K+;
+    /// past this the line measure for the description becomes too wide
+    /// for comfortable reading.
+    public static let maxWidth: CGFloat = 760
+
+    /// Fraction of the screen's visible width to occupy. 0.34 lands at
+    /// ~514pt on a 1512pt-wide 14" laptop and clamps to 760pt on 4K/5K
+    /// — generous on Retina+ without becoming dominant.
+    private static let screenFraction: CGFloat = 0.34
+
+    /// Width of the next pinentry dialog, computed against the supplied
+    /// screen (or `NSScreen.main`). Always lands in `[minWidth, maxWidth]`.
+    public static func preferredWidth(for screen: NSScreen? = NSScreen.main) -> CGFloat {
+        let visible = (screen ?? NSScreen.screens.first)?.visibleFrame.width ?? 1440
+        let raw = visible * screenFraction
+        return min(max(raw, minWidth), maxWidth)
+    }
 
     /// Closure invoked when the user clicks the red close button. Set by
     /// `HostingController.makePinentryWindow` so the coordinator can resume

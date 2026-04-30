@@ -27,7 +27,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let stdout = FileHandle.standardOutput
 
         let session = Session(input: stdin, output: stdout)
-        let qualityProvider = SessionQualityProvider(session: session)
 
         // Daemon mode reads UI settings (theme, etc.) so the modal pinentry
         // dialog matches the user's choice. The Coordinator currently takes
@@ -41,7 +40,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             let uiSettings = await UISettingsStore().load()
             let coordinator = PinentryCoordinator(
-                qualityProvider: qualityProvider,
                 userPrefs: prefs,
                 uiSettings: uiSettings
             )
