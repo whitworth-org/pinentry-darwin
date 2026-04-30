@@ -30,6 +30,27 @@ import SecureMemory
 // MARK: - Logger
 
 /// Control-flow logger only. Never log secrets or quality scores.
+///
+/// Privacy convention (per security review L11):
+///
+/// * Static format strings with no interpolation are inherently safe
+///   — the unified-logging redaction model only applies to
+///   interpolated values.
+/// * Any interpolated value MUST carry an explicit
+///   `\(value, privacy: .public)` or `\(value, privacy: .private)`
+///   marker. `.public` for non-sensitive control-flow context
+///   (errno, exit code, command verb), `.private` for
+///   identifier-shaped data that may correlate to a user identity
+///   (fingerprint, key id, label, file path).
+/// * Never log SecureBytes contents, decoded passphrases, quality
+///   scores, or any value originating from a `D` line. The
+///   private-marker policy is a backstop — the *primary* guard is
+///   "do not interpolate it at all."
+///
+/// `os_log` defaults the privacy of an interpolated `String` to
+/// PUBLIC in release builds; an unmarked interpolation therefore
+/// surfaces in `log show` even with no debugger attached. The
+/// convention above forecloses that regression.
 private let log = Logger(subsystem: "org.whitworth.pinentry-darwin", category: "assuan")
 
 // MARK: - DialogState
