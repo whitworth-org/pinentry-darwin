@@ -20,12 +20,27 @@
 #   5. On exit (or Ctrl-C), kills the private agent and removes GNUPGHOME.
 #
 # Usage:
-#   scripts/integration-gpg-agent.sh
+#   scripts/integration-gpg-agent.sh             # full interactive run
+#   scripts/integration-gpg-agent.sh --check     # autonomous prelude only
+#
+# `--check` does everything the interactive flow does up through "agent is up
+# and can talk to its socket", then tears down. It's the most-coverage check
+# we can do without a human typing into a SwiftUI dialog: it exercises the
+# fork/exec path (agent finds and runs our binary), the agent's gpg-agent.conf
+# parsing of `pinentry-program`, and the basic Assuan handshake on the agent
+# control socket. The actual GETPIN dialog is interactive-only.
 #
 # Override paths with env vars:
 #   PINENTRY_BIN=/path/to/pinentry-darwin scripts/integration-gpg-agent.sh
 
 set -euo pipefail
+
+MODE="interactive"
+case "${1:-}" in
+    --check)  MODE="check" ;;
+    "")       : ;;
+    *)        echo "usage: $0 [--check]" >&2; exit 2 ;;
+esac
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_DEFAULT="$REPO_ROOT/build/pinentry-darwin.app/Contents/MacOS/pinentry-darwin"
@@ -36,17 +51,15 @@ if [ ! -x "$PINENTRY_BIN" ]; then
     (cd "$REPO_ROOT" && make build >/dev/null)
 fi
 
-# Per-run sandbox.
-SANDBOX="$(mktemp -d -t pinentry-darwin-int.XXXXXX)"
+# Per-run sandbox. We deliberately put this under /tmp (short prefix) rather
+# than $TMPDIR because gpg-agent's UNIX socket paths are length-capped at
+# 104 bytes on Darwin, and the default macOS $TMPDIR is already ~60 chars.
+SANDBOX="$(mktemp -d /tmp/pdint.XXXXXX)"
 trap 'finalize' EXIT INT TERM
 
 finalize() {
-    if [ -n "${AGENT_PID:-}" ] && kill -0 "$AGENT_PID" 2>/dev/null; then
-        kill "$AGENT_PID" 2>/dev/null || true
-        # gpg-agent forks; clean up its socket too.
-        gpgconf --homedir "$SANDBOX" --kill gpg-agent >/dev/null 2>&1 || true
-    fi
     if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
+        gpgconf --homedir "$SANDBOX" --kill gpg-agent >/dev/null 2>&1 || true
         rm -rf "$SANDBOX"
     fi
 }
@@ -68,14 +81,51 @@ EOF
 
 echo "integration: GNUPGHOME=$SANDBOX"
 echo "integration: starting private gpg-agent..."
-gpg-agent --homedir "$SANDBOX" --daemon --use-standard-socket >"$SANDBOX/agent.log" 2>&1 &
-AGENT_PID=$!
-sleep 1
-
-if ! kill -0 "$AGENT_PID" 2>/dev/null; then
-    echo "integration: gpg-agent failed to start. Log:" >&2
+# `--daemon` forks: the launcher exits, the daemon detaches. We can't track
+# its PID from `$!`, so verify liveness by talking to the socket instead.
+gpg-agent --homedir "$SANDBOX" --daemon >"$SANDBOX/agent.log" 2>&1
+for _ in 1 2 3 4 5; do
+    if gpg-connect-agent --homedir "$SANDBOX" /bye >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.2
+done
+if ! gpg-connect-agent --homedir "$SANDBOX" /bye >/dev/null 2>&1; then
+    echo "integration: gpg-agent failed to come up. Log:" >&2
     cat "$SANDBOX/agent.log" >&2
     exit 1
+fi
+AGENT_PID=""  # tracked via gpgconf --kill in finalize, not by PID
+
+# Autonomous probes — agent reachability + binary self-tests. These never
+# pop a dialog, so they're safe to run without a human present.
+echo "integration: probing agent control socket..."
+if ! gpg-connect-agent --homedir "$SANDBOX" 'GETINFO version' /bye >"$SANDBOX/probe.out" 2>&1; then
+    echo "integration: FAIL — gpg-connect-agent could not reach the agent." >&2
+    cat "$SANDBOX/probe.out" >&2
+    exit 1
+fi
+if ! grep -qE '^D ' "$SANDBOX/probe.out"; then
+    echo "integration: FAIL — agent did not return a D-line for GETINFO version." >&2
+    cat "$SANDBOX/probe.out" >&2
+    exit 1
+fi
+agent_version="$(awk '/^D /{print $2; exit}' "$SANDBOX/probe.out")"
+echo "integration: agent reports gpg-agent version $agent_version"
+
+echo "integration: probing pinentry-darwin self-test paths..."
+"$PINENTRY_BIN" --version >"$SANDBOX/bin-version.out" 2>&1
+if ! grep -qE '^pinentry-darwin [0-9]' "$SANDBOX/bin-version.out"; then
+    echo "integration: FAIL — pinentry-darwin --version did not match expected format." >&2
+    cat "$SANDBOX/bin-version.out" >&2
+    exit 1
+fi
+echo "integration: $(cat "$SANDBOX/bin-version.out")"
+
+if [ "$MODE" = "check" ]; then
+    echo "integration: --check PASS (agent up, socket reachable, binary self-test OK)"
+    echo "integration: skipping interactive GETPIN section."
+    exit 0
 fi
 
 cat <<EOF

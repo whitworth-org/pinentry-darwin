@@ -51,7 +51,7 @@ PKG_SIGNED      := $(BUILD_DIR)/$(APP_NAME)-$(VERSION).pkg
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug test smoke audit audit-release check-signing sign notarize pkg tarball release clean
+.PHONY: help build debug test smoke integration-check audit audit-release check-signing sign notarize pkg tarball release clean
 
 # --- Targets -----------------------------------------------------------------
 
@@ -62,6 +62,7 @@ help:
 	@echo "  debug           swift build (debug, no bundle)"
 	@echo "  test            swift test"
 	@echo "  smoke           feed an Assuan transcript to the bundled binary"
+	@echo "  integration-check spawn a real gpg-agent against the binary, probe non-interactively"
 	@echo "  audit           static-audit the built .app bundle (Mach-O, plist, entitlements)"
 	@echo "  audit-release   like audit, plus require Developer ID + stapled notarization"
 	@echo "  check-signing   verify Developer ID identity for Team $(TEAM_ID)"
@@ -94,6 +95,9 @@ test:
 
 smoke: build
 	scripts/smoke-assuan.sh build/pinentry-darwin.app/Contents/MacOS/pinentry-darwin
+
+integration-check: build
+	scripts/integration-gpg-agent.sh --check
 
 audit: build
 	scripts/audit-bundle.sh $(APP_BUNDLE)
