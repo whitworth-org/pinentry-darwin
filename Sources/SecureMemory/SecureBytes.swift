@@ -228,6 +228,15 @@ public final class SecureBytes: @unchecked Sendable {
     /// called `secureZero` before unmapping. Set to `true` immediately after
     /// the wipe in `deinit`. **Never read or set this in non-test code.**
     public nonisolated(unsafe) static var lastDeinitWasZeroed: Bool = false
+    /// Debug-only hook recording whether `munlock` succeeded in `deinit`.
+    /// `nil` if the buffer was never locked (best-effort `mlock` failure).
+    public nonisolated(unsafe) static var lastDeinitDidMunlock: Bool? = nil
+    /// Debug-only hook recording whether `munmap` succeeded in `deinit`.
+    public nonisolated(unsafe) static var lastDeinitDidMunmap: Bool = false
+    /// Debug-only hook recording the most recent value of `wasLocked` at
+    /// the moment the instance was deinit'd. Used by tests that don't keep
+    /// the instance alive long enough to query `debugDescription()`.
+    public nonisolated(unsafe) static var lastDeinitWasLocked: Bool = false
     #endif
 
     // MARK: - Cleanup
@@ -255,9 +264,23 @@ public final class SecureBytes: @unchecked Sendable {
         SecureBytes.lastDeinitWasZeroed = allZero
         #endif
 
+        #if DEBUG
+        SecureBytes.lastDeinitWasLocked = wasLocked
+        #endif
+
         if wasLocked {
-            secureMunlock(ptr, bytes: mappedBytes)
+            let unlocked = secureMunlock(ptr, bytes: mappedBytes)
+            #if DEBUG
+            SecureBytes.lastDeinitDidMunlock = unlocked
+            #endif
+        } else {
+            #if DEBUG
+            SecureBytes.lastDeinitDidMunlock = nil
+            #endif
         }
-        secureMunmap(ptr, bytes: mappedBytes)
+        let unmapped = secureMunmap(ptr, bytes: mappedBytes)
+        #if DEBUG
+        SecureBytes.lastDeinitDidMunmap = unmapped
+        #endif
     }
 }

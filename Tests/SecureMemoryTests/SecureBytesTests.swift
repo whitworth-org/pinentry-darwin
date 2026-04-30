@@ -242,6 +242,45 @@ final class SecureBytesTests: XCTestCase {
         XCTAssertTrue(SecureBytes.lastDeinitWasZeroed,
                       "deinit must zero the mapping before unmapping")
     }
+
+    /// Full page-lifecycle invariant. Under normal test conditions on macOS
+    /// the kernel grants `mlock`, so `deinit` should observe in order:
+    ///   1. wipe (lastDeinitWasZeroed)
+    ///   2. wasLocked == true (lastDeinitWasLocked)
+    ///   3. munlock returns success (lastDeinitDidMunlock == .some(true))
+    ///   4. munmap returns success (lastDeinitDidMunmap)
+    ///
+    /// This is the autonomous half of the leaks/vmmap acceptance criterion
+    /// in CLAUDE.md — the manual half (open a dialog, dismiss, run `leaks`)
+    /// still needs a human, but the underlying syscall chain is verified
+    /// here on every CI run.
+    func testDeinitFullLifecycle() {
+        SecureBytes.lastDeinitWasZeroed = false
+        SecureBytes.lastDeinitWasLocked = false
+        SecureBytes.lastDeinitDidMunlock = nil
+        SecureBytes.lastDeinitDidMunmap = false
+
+        do {
+            let buf = SecureBytes(capacity: 128)
+            buf.withUnsafeMutableBytes { full in
+                for i in 0..<full.count { full[i] = 0xA5 }
+            }
+            // The instance has to be referenced after the writes so the
+            // writes aren't optimised away; debugDescription is a no-op
+            // touch that also asserts wasLocked at allocation time.
+            XCTAssertTrue(buf.debugDescription().contains("locked: true"),
+                          "fresh allocation should be mlock'd under default RLIMIT_MEMLOCK")
+        }
+
+        XCTAssertTrue(SecureBytes.lastDeinitWasZeroed,
+                      "deinit must zero the mapping")
+        XCTAssertTrue(SecureBytes.lastDeinitWasLocked,
+                      "deinit must observe wasLocked == true")
+        XCTAssertEqual(SecureBytes.lastDeinitDidMunlock, .some(true),
+                       "deinit must munlock the locked region")
+        XCTAssertTrue(SecureBytes.lastDeinitDidMunmap,
+                      "deinit must munmap the region")
+    }
     #endif
 
     // MARK: - debugDescription doesn't leak content
