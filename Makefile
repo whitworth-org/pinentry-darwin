@@ -81,19 +81,35 @@ help:
 debug:
 	swift build
 
-build:
-	swift build -c release
-	install -d $(APP_MACOS)
-	install -d $(APP_CONTENTS)
-	cp $(RELEASE_BIN) $(APP_MACOS)/$(APP_NAME)
-	cp $(INFO_PLIST) $(APP_CONTENTS)/Info.plist
-	# NOTE: entitlements file is NOT bundled. It's an INPUT to `codesign`
-	# (passed via --entitlements), not a runtime resource. Putting it inside
-	# Contents/ makes codesign treat it as an unsigned subcomponent and fail
-	# the sign step. Source-of-truth lives at $(ENTITLEMENTS); audit reads
-	# the embedded entitlements from the signed binary, falling back to the
-	# source file for unsigned dev builds.
+build: $(APP_MACOS)/$(APP_NAME) $(APP_CONTENTS)/Info.plist
 	@echo "Bundled $(APP_BUNDLE)"
+
+# The bundled binary depends on the swift-built artefact; cp -p preserves
+# mtime so subsequent `make build` invocations are no-ops once the bundle
+# is up to date. Critically, this means `make sign && make audit` does NOT
+# re-copy the unsigned binary over the freshly codesigned one — only a
+# real source change triggers a rebuild.
+#
+# NOTE: entitlements file is NOT bundled. It's an INPUT to `codesign`
+# (passed via --entitlements), not a runtime resource. Putting it inside
+# Contents/ makes codesign treat it as an unsigned subcomponent and fail
+# the sign step. Source-of-truth lives at $(ENTITLEMENTS); audit reads
+# the embedded entitlements from the signed binary, falling back to the
+# source file for unsigned dev builds.
+$(APP_MACOS)/$(APP_NAME): $(RELEASE_BIN) | $(APP_MACOS)
+	cp -p $< $@
+
+$(APP_CONTENTS)/Info.plist: $(INFO_PLIST) | $(APP_CONTENTS)
+	cp -p $< $@
+
+$(APP_MACOS) $(APP_CONTENTS):
+	install -d $@
+
+$(RELEASE_BIN): FORCE
+	swift build -c release
+
+.PHONY: FORCE
+FORCE:
 
 test:
 	swift test
