@@ -121,6 +121,24 @@ public struct DialogSpec: Sendable {
         if let p = prompt, !p.isEmpty { return p }
         return defaults.prompt
     }
+
+    // MARK: - Keychain affordance gating
+    //
+    // pinentry-mac shows "Save in Keychain" for any SETKEYINFO mode except
+    // 'u' (user / symmetric), regardless of OPTION allow-external-password-
+    // cache. We match that behaviour so users see the same UX. Modes:
+    //   'n' — normal asymmetric key
+    //   's' — ssh
+    //   'c' — card-resident PIN
+    //   'u' — user-managed (e.g. gpg-preset-passphrase) — DO NOT cache
+    public static func canSaveToKeychain(
+        keyInfo: KeyInfo?,
+        keychainEnabled: Bool
+    ) -> Bool {
+        guard case .key(let mode, _)? = keyInfo else { return false }
+        guard mode != "u" else { return false }
+        return keychainEnabled
+    }
 }
 
 // MARK: - DialogResult

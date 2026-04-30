@@ -48,4 +48,45 @@ final class DialogSpecTests: XCTestCase {
         spec.cancelLabel = "Abort"
         XCTAssertEqual(spec.resolvedCancel, "Abort")
     }
+
+    // MARK: - Keychain affordance gating
+    //
+    // pinentry-mac shows "Save in Keychain" for any keyinfo mode except
+    // 'u' (user). gpg-agent's OPTION allow-external-password-cache is
+    // ignored — pinentry-mac doesn't honour it and we must match.
+
+    func testCanSaveToKeychainNormalMode() {
+        let ki = DialogSpec.KeyInfo.key(mode: "n", fingerprint: String(repeating: "F", count: 40))
+        XCTAssertTrue(DialogSpec.canSaveToKeychain(keyInfo: ki, keychainEnabled: true),
+                      "mode 'n' (normal asymmetric key) must allow Save")
+    }
+
+    func testCanSaveToKeychainSshMode() {
+        let ki = DialogSpec.KeyInfo.key(mode: "s", fingerprint: String(repeating: "F", count: 40))
+        XCTAssertTrue(DialogSpec.canSaveToKeychain(keyInfo: ki, keychainEnabled: true),
+                      "mode 's' (ssh) must allow Save")
+    }
+
+    func testCanSaveToKeychainCardMode() {
+        let ki = DialogSpec.KeyInfo.key(mode: "c", fingerprint: String(repeating: "F", count: 40))
+        XCTAssertTrue(DialogSpec.canSaveToKeychain(keyInfo: ki, keychainEnabled: true),
+                      "mode 'c' (smartcard PIN) must allow Save")
+    }
+
+    func testCanSaveToKeychainUserModeBlocked() {
+        let ki = DialogSpec.KeyInfo.key(mode: "u", fingerprint: String(repeating: "F", count: 40))
+        XCTAssertFalse(DialogSpec.canSaveToKeychain(keyInfo: ki, keychainEnabled: true),
+                       "mode 'u' (user-managed) must block Save — matches pinentry-mac")
+    }
+
+    func testCanSaveToKeychainNoKeyInfoBlocked() {
+        XCTAssertFalse(DialogSpec.canSaveToKeychain(keyInfo: nil, keychainEnabled: true),
+                       "no SETKEYINFO means no fingerprint to key against")
+    }
+
+    func testCanSaveToKeychainPrefDisabledBlocked() {
+        let ki = DialogSpec.KeyInfo.key(mode: "n", fingerprint: String(repeating: "F", count: 40))
+        XCTAssertFalse(DialogSpec.canSaveToKeychain(keyInfo: ki, keychainEnabled: false),
+                       "user disabled keychain in prefs blocks Save")
+    }
 }

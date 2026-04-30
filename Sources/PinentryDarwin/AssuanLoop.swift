@@ -181,7 +181,7 @@ final class AssuanLoop {
                 dialog.description = s
                 await reply(.ok)
             case .setPrompt(let s):
-                dialog.prompt = s
+                dialog.prompt = Mnemonic.strip(s)
                 await reply(.ok)
             case .setTitle(let s):
                 dialog.title = s
@@ -190,13 +190,13 @@ final class AssuanLoop {
                 dialog.error = s
                 await reply(.ok)
             case .setOK(let s):
-                dialog.okLabel = s
+                dialog.okLabel = Mnemonic.strip(s)
                 await reply(.ok)
             case .setNotOK(let s):
-                dialog.notOKLabel = s
+                dialog.notOKLabel = Mnemonic.strip(s)
                 await reply(.ok)
             case .setCancel(let s):
-                dialog.cancelLabel = s
+                dialog.cancelLabel = Mnemonic.strip(s)
                 await reply(.ok)
 
             case .setKeyInfo(let ki):
@@ -209,10 +209,10 @@ final class AssuanLoop {
                 await reply(.ok)
 
             case .setRepeat(let s):
-                dialog.repeatPrompt = s
+                dialog.repeatPrompt = Mnemonic.strip(s)
                 await reply(.ok)
             case .setRepeatOK(let s):
-                dialog.repeatOK = s
+                dialog.repeatOK = Mnemonic.strip(s)
                 await reply(.ok)
             case .setRepeatError(let s):
                 dialog.repeatError = s
@@ -223,7 +223,7 @@ final class AssuanLoop {
                 await reply(.ok)
 
             case .setQualityBar(let label):
-                dialog.qualityBar = label ?? ""
+                dialog.qualityBar = label.map(Mnemonic.strip) ?? ""
                 await reply(.ok)
             case .setQualityBarTT(let s):
                 dialog.qualityBarTooltip = s
@@ -466,11 +466,15 @@ final class AssuanLoop {
             keyInfo = nil
         }
 
-        let allowSave: Bool = {
-            guard keyInfo != nil else { return false }
-            guard optionState.allowExternalPasswordCache else { return false }
-            return prefs.keychainEnabled
-        }()
+        // Match pinentry-mac: show Save in Keychain for any keyinfo mode
+        // except 'u' (user-managed). gpg-agent's OPTION
+        // allow-external-password-cache is informational only; pinentry-mac
+        // ignores it and we follow suit so existing GPGTools users see the
+        // same UX they're used to.
+        let allowSave = DialogSpec.canSaveToKeychain(
+            keyInfo: keyInfo,
+            keychainEnabled: prefs.keychainEnabled
+        )
 
         return DialogSpec(
             kind: .pin,

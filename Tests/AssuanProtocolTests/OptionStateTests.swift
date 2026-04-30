@@ -85,4 +85,30 @@ final class OptionStateTests: XCTestCase {
         s.apply(key: "no-such-option", value: "whatever")
         XCTAssertEqual(s, before)
     }
+
+    // gpg-agent ships button-style defaults with GTK mnemonic markers
+    // ("_OK"). OptionState must strip them at ingestion so the View never
+    // renders a literal "_OK".
+    func testButtonLabelMnemonicsStripped() {
+        var s = OptionState()
+        s.apply(key: "default-ok", value: "_OK")
+        s.apply(key: "default-cancel", value: "_Cancel")
+        s.apply(key: "default-prompt", value: "_PIN:")
+        s.apply(key: "default-pwmngr", value: "_Save in password manager")
+        XCTAssertEqual(s.defaultOK, "OK")
+        XCTAssertEqual(s.defaultCancel, "Cancel")
+        XCTAssertEqual(s.defaultPrompt, "PIN:")
+        XCTAssertEqual(s.defaultPwManager, "Save in password manager")
+    }
+
+    // Sentence-form options (cf-visi / capshint) are NOT stripped — they
+    // carry message text where literal underscores might be intended.
+    func testSentenceOptionsNotStripped() {
+        var s = OptionState()
+        s.apply(key: "default-cf-visi",
+                value: "Make passphrase visible?")
+        s.apply(key: "default-capshint", value: "Caps Lock is on")
+        XCTAssertEqual(s.defaultCfVisi, "Make passphrase visible?")
+        XCTAssertEqual(s.defaultCapsHint, "Caps Lock is on")
+    }
 }

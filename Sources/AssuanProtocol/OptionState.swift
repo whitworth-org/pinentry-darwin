@@ -71,14 +71,18 @@ public struct OptionState: Sendable, Equatable {
         case "allow-emacs-prompt":
             allowEmacsPrompt = true
 
+        // Button/prompt-style labels carry GTK mnemonic markers ("_OK") in
+        // gpg-agent's wire shipments. Strip at ingestion so downstream
+        // consumers see clean text. Sentence-form options (cf-visi /
+        // capshint) are left untouched — they're message text, not labels.
         case "default-ok":
-            defaultOK = value
+            defaultOK = Mnemonic.stripOptional(value)
         case "default-cancel":
-            defaultCancel = value
+            defaultCancel = Mnemonic.stripOptional(value)
         case "default-prompt":
-            defaultPrompt = value
+            defaultPrompt = Mnemonic.stripOptional(value)
         case "default-pwmngr":
-            defaultPwManager = value
+            defaultPwManager = Mnemonic.stripOptional(value)
         case "default-cf-visi":
             defaultCfVisi = value
         case "default-tt-visi":
