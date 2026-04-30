@@ -66,10 +66,21 @@ public struct KeychainStore: Sendable {
     /// When true, new writes target the modern data-protection keychain
     /// where the ACL is enforced by code signature. When false, all
     /// operations go to the legacy file-based keychain (matches
-    /// pinentry-mac's wire-compatible layout exactly). Defaults to true
-    /// for production; tests pass false because a `swift test` binary is
-    /// often ad-hoc-signed and may not have a stable identity for the
-    /// data-protection keychain.
+    /// pinentry-mac's wire-compatible layout exactly).
+    ///
+    /// Defaults to true. Per-call fallback: if a write to the data-
+    /// protection keychain returns `errSecMissingEntitlement` (-34018)
+    /// — the failure mode for ad-hoc-signed binaries that lack a stable
+    /// Apple-issued code identity — `store(...)` automatically falls
+    /// back to the legacy backend. Reads (`lookup`) probe the data-
+    /// protection keychain first and likewise degrade on entitlement
+    /// failure. Production Developer ID builds never trip the fallback
+    /// because the kernel grants them the entitlement implicitly via
+    /// their `application-identifier` derived from Team ID + Bundle ID;
+    /// the os_log entry on each fallback makes regressions auditable.
+    ///
+    /// Tests pass `false` explicitly to pin themselves on the legacy
+    /// backend regardless of the host's signing posture.
     private let useDataProtectionKeychain: Bool
 
     public init(
@@ -92,18 +103,39 @@ public struct KeychainStore: Sendable {
     /// legacy backend, migrates the entry to data-protection (re-store +
     /// legacy delete) before returning. Migration is best-effort.
     public func lookup(fingerprint: String) throws -> SecureBytes? {
-        // Try the configured primary backend.
-        if let bytes = try rawLookup(
-            fingerprint: fingerprint,
-            dataProtection: useDataProtectionKeychain
-        ) {
-            return bytes
+        // 1. Try the configured primary backend. If the data-protection
+        //    keychain rejects with errSecMissingEntitlement (ad-hoc dev
+        //    build), short-circuit straight to the legacy backend.
+        do {
+            if let bytes = try rawLookup(
+                fingerprint: fingerprint,
+                dataProtection: useDataProtectionKeychain
+            ) {
+                return bytes
+            }
+        } catch KeychainStoreError.unexpectedStatus(let s)
+            where s == errSecMissingEntitlement && useDataProtectionKeychain
+        {
+            // No entitlement → can't read from data-protection at all.
+            // Skip migration; just go legacy.
+            return try rawLookup(fingerprint: fingerprint, dataProtection: false)
         }
-        // Migration: when primary is data-protection, also probe legacy
-        // (which is where pinentry-mac writes and where pre-H1 pinentry-darwin
-        // builds wrote). On hit, copy forward and delete the legacy entry.
+        // 2. Migration: when primary is data-protection, also probe legacy
+        //    (which is where pinentry-mac writes and where pre-H1 pinentry-
+        //    darwin builds wrote). On hit, copy forward and delete the
+        //    legacy entry.
+        //
+        // The legacy probe uses `try?` rather than `try` so any ACL prompt
+        // or auth failure on the legacy backend is swallowed silently. The
+        // legacy file-based keychain ignores `kSecUseAuthenticationUISkip`
+        // and prompts whenever an ACL doesn't recognize the calling app's
+        // code identity — exactly the scenario for ad-hoc dev binaries
+        // and for entries written by pinentry-mac. A noisy prompt during
+        // cache lookup defeats the "fast path" cache promise; silent
+        // failure means "no migrate-able legacy entry, fall through to
+        // the GETPIN dialog."
         if useDataProtectionKeychain,
-           let legacyBytes = try rawLookup(
+           let legacyBytes = try? rawLookup(
                fingerprint: fingerprint,
                dataProtection: false
            )
@@ -142,12 +174,28 @@ public struct KeychainStore: Sendable {
         label: String?,
         passphrase: SecureBytes
     ) throws {
-        try rawStore(
-            fingerprint: fingerprint,
-            label: label,
-            passphrase: passphrase,
-            dataProtection: useDataProtectionKeychain
-        )
+        do {
+            try rawStore(
+                fingerprint: fingerprint,
+                label: label,
+                passphrase: passphrase,
+                dataProtection: useDataProtectionKeychain
+            )
+        } catch KeychainStoreError.unexpectedStatus(let s)
+            where s == errSecMissingEntitlement && useDataProtectionKeychain
+        {
+            // Ad-hoc-signed binaries cannot write to the data-protection
+            // keychain (no stable application-identifier). Degrade to
+            // the legacy file-based keychain so the user still gets a
+            // working "Save in Keychain" affordance during development.
+            // Production Developer ID builds never reach this path.
+            try rawStore(
+                fingerprint: fingerprint,
+                label: label,
+                passphrase: passphrase,
+                dataProtection: false
+            )
+        }
     }
 
     // MARK: Clear
@@ -210,6 +258,16 @@ public struct KeychainStore: Sendable {
         var query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
         query[kSecReturnData as String] = kCFBooleanTrue as Any
         query[kSecMatchLimit as String] = kSecMatchLimitOne
+        // Critical: cache lookup MUST NOT block on a system Keychain ACL
+        // prompt. gpg-agent invokes pinentry on every uncached operation
+        // and the GETPIN dialog can't render until lookup returns; a
+        // synchronous "Allow / Always Allow / Deny" sheet would deadlock
+        // the user behind their own pinentry. With UISkip the framework
+        // returns errSecInteractionNotAllowed instead — we treat that as
+        // "cache miss" so the dialog renders immediately and the user
+        // can grant ACL during the *store* path on submit (where the UI
+        // is expected and correct).
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
 
         var status = OSStatus(errSecSuccess)
         var item: CFTypeRef?
@@ -227,7 +285,9 @@ public struct KeychainStore: Sendable {
         switch status {
         case errSecSuccess:
             break
-        case errSecItemNotFound:
+        case errSecItemNotFound, errSecInteractionNotAllowed:
+            // Both flow back as "cache miss" — InteractionNotAllowed is
+            // the success path for the UISkip suppression above.
             return nil
         case errSecUserCanceled:
             throw KeychainStoreError.userCanceled
@@ -331,7 +391,12 @@ public struct KeychainStore: Sendable {
         fingerprint: String,
         dataProtection: Bool
     ) throws {
-        let query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+        var query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+        // Mirror rawLookup: clearing must not block on an ACL prompt.
+        // CLEARPASSPHRASE arrives mid-Assuan-session and we must respond
+        // OK promptly. If the entry is ACL-locked we treat it as already
+        // gone (idempotent semantics).
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
 
         var status = OSStatus(errSecSuccess)
         var attempts = 0
@@ -341,7 +406,7 @@ public struct KeychainStore: Sendable {
         } while status == errSecAuthFailed && attempts < 2
 
         switch status {
-        case errSecSuccess, errSecItemNotFound:
+        case errSecSuccess, errSecItemNotFound, errSecInteractionNotAllowed:
             return
         case errSecUserCanceled:
             throw KeychainStoreError.userCanceled

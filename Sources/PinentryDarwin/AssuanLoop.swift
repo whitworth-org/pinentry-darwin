@@ -286,8 +286,13 @@ final class AssuanLoop {
                     dialog.error = nil
                     return
                 }
-            } catch {
+            } catch let kse as KeychainStoreError {
                 // Lookup failures are non-fatal — fall through to UI.
+                // OSStatus is non-sensitive and helps post-mortem diagnosis
+                // when the cache path silently degrades (e.g. errSec
+                // MissingEntitlement on an ad-hoc-signed dev build).
+                log.error("keychain lookup failed: \(Self.describe(kse), privacy: .public); falling back to UI")
+            } catch {
                 log.error("keychain lookup failed; falling back to UI")
             }
         }
@@ -300,6 +305,13 @@ final class AssuanLoop {
         case .pin(let secure, let savedToKeychain):
             // Optional store-on-submit. Best effort: any failure is logged
             // but does not prevent us from returning the passphrase.
+            //
+            // Diagnostic logging: emit one info line per submit naming
+            // which gate the store path took. The fingerprint is logged
+            // .private (correlates to the user's keys) but the gate
+            // outcome is .public so post-mortems can tell at a glance
+            // whether the user ticked Save in Keychain, whether the spec
+            // had a keyinfo, and whether the user disabled the cache.
             if savedToKeychain,
                case .key(_, let fpr)? = dialog.keyInfo,
                prefs.keychainEnabled
@@ -309,9 +321,25 @@ final class AssuanLoop {
                     try keychain.store(fingerprint: fpr,
                                        label: label,
                                        passphrase: secure)
+                    log.info("keychain store ok; fingerprint=\(fpr, privacy: .private)")
+                } catch let kse as KeychainStoreError {
+                    log.error("keychain store failed: \(Self.describe(kse), privacy: .public); passphrase not cached")
                 } catch {
-                    log.error("keychain store failed; passphrase not cached")
+                    log.error("keychain store failed (unknown); passphrase not cached")
                 }
+            } else {
+                // Diagnostic: explain why we skipped the store path so
+                // post-mortems can tell apart "user unticked Save",
+                // "no SETKEYINFO", and "keychainEnabled=false".
+                let why: String
+                if !savedToKeychain {
+                    why = "user-unchecked-save"
+                } else if dialog.keyInfo == nil {
+                    why = "no-keyinfo"
+                } else {
+                    why = "prefs-disabled"
+                }
+                log.info("keychain store skipped: \(why, privacy: .public)")
             }
 
             await reply(.data(secure))
@@ -548,6 +576,20 @@ final class AssuanLoop {
     /// still alive. Returns the result of the underlying call.
     private func sendErr(code: UInt32, message: String) async throws {
         try await session.send(.err(code: code, message: message))
+    }
+
+    /// Render a `KeychainStoreError` as a short non-sensitive string for
+    /// os_log. Includes the OSStatus when present so future regressions
+    /// (e.g. errSecMissingEntitlement = -34018 on an ad-hoc dev build,
+    /// or errSecAuthFailed = -25293 on a stale ACL) are diagnosable from
+    /// `log show` without re-running the failing flow under a debugger.
+    private static func describe(_ error: KeychainStoreError) -> String {
+        switch error {
+        case .userCanceled:
+            return "userCanceled"
+        case .unexpectedStatus(let s):
+            return "unexpectedStatus(\(s))"
+        }
     }
 }
 
