@@ -40,4 +40,28 @@ final class PinentryWindowTests: XCTestCase {
         win.performClose(nil)
         XCTAssertEqual(fired, 1, "performClose must route through onCloseRequested when set")
     }
+
+    // Regression: macOS's standard close button can call `close()` directly
+    // (bypassing performClose:) — pinentry-darwin must catch that path too,
+    // otherwise the red-X dismisses the window without emitting
+    // BUTTON_INFO close + ERR and the binary blocks forever.
+    func testDirectCloseInterceptedWhenHandlerSet() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        var fired = 0
+        win.onCloseRequested = { fired += 1 }
+        win.close()
+        XCTAssertEqual(fired, 1, "close() must route through onCloseRequested when set")
+    }
+
+    // The resolver dismisses the window after delivering its result via
+    // `pw.isResolvingDismissal = true; pw.close()`. That path must NOT
+    // re-fire onCloseRequested, otherwise we deliver twice.
+    func testResolverDrivenCloseDoesNotRefire() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        var fired = 0
+        win.onCloseRequested = { fired += 1 }
+        win.isResolvingDismissal = true
+        win.close()
+        XCTAssertEqual(fired, 0, "resolver-driven close must bypass onCloseRequested")
+    }
 }

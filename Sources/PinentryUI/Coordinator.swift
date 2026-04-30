@@ -55,6 +55,11 @@ public final class PinentryCoordinator {
             guard let cont = continuation else { return }
             continuation = nil
             cont.resume(returning: result)
+            // Mark dismissal as resolver-driven before closing so
+            // PinentryWindow.close() doesn't re-fire onCloseRequested.
+            if let pw = window as? PinentryWindow {
+                pw.isResolvingDismissal = true
+            }
             window?.close()
             window = nil
             // Defensive: if SwiftUI's onDisappear didn't fire (rare under

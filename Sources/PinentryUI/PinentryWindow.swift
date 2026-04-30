@@ -120,14 +120,33 @@ public final class PinentryWindow: NSWindow {
     public override var canBecomeKey: Bool { true }
     public override var canBecomeMain: Bool { true }
 
+    /// Set true by the coordinator's resolver before it calls `close()` to
+    /// dismiss the window after a result has been delivered. While this is
+    /// true, our `close()` override forwards directly to super instead of
+    /// re-entering `onCloseRequested` (which would resolve a second time).
+    public var isResolvingDismissal: Bool = false
+
     // Intercept the close button (red traffic light). Returning false
     // suppresses the default close so the coordinator can decide what to
     // emit on the wire (`BUTTON_INFO close` then ERR).
     public override func performClose(_ sender: Any?) {
-        if let onCloseRequested {
+        if !isResolvingDismissal, let onCloseRequested {
             onCloseRequested()
             return
         }
         super.performClose(sender)
+    }
+
+    // Belt-and-suspenders: macOS may invoke `close()` directly from the
+    // standard window-close path (private button action, command-w, etc.)
+    // without first routing through `performClose:`. Catch that path too,
+    // and gate on `isResolvingDismissal` so the resolver's own `close()`
+    // call doesn't re-enter the callback.
+    public override func close() {
+        if !isResolvingDismissal, let onCloseRequested {
+            onCloseRequested()
+            return
+        }
+        super.close()
     }
 }
