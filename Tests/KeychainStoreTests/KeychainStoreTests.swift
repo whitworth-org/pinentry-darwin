@@ -35,10 +35,22 @@ final class KeychainStoreTests: XCTestCase {
     /// Build a `(KeychainStore, fingerprint)` pair where `service` is unique
     /// per call. Using a per-test service keeps these tests from observing or
     /// disturbing real `service="GnuPG"` entries on the developer's machine.
+    ///
+    /// `useDataProtectionKeychain: false` keeps these tests on the legacy
+    /// keychain. The `swift test` binary is typically ad-hoc-signed and
+    /// cannot establish a stable data-protection-keychain identity, so
+    /// hitting that path here would surface as errSecMissingEntitlement.
+    /// Production code uses the default (true) which routes through the
+    /// modern, code-signature-ACL'd keychain.
     private func makeStore() -> (KeychainStore, String) {
         let unique = UUID().uuidString
-        return (KeychainStore(service: "GnuPG-test-\(unique)"),
-                "fingerprint-\(unique)")
+        return (
+            KeychainStore(
+                service: "GnuPG-test-\(unique)",
+                useDataProtectionKeychain: false
+            ),
+            "fingerprint-\(unique)"
+        )
     }
 
     /// Convenience: build a SecureBytes from a Swift array. Used only for

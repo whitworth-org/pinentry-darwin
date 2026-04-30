@@ -10,6 +10,33 @@
 //   kSecAttrService = "GnuPG"           (configurable for tests only)
 //   kSecAttrAccount = <fingerprint>
 //   kSecAttrLabel   = <user-id>         (visible in Keychain Access)
+//
+// HARDENING (review H1):
+// The legacy file-based keychain enforces a same-user-with-default-ACL
+// policy: any process running as the same user can read after the user
+// granted access once. For a passphrase-handling daemon that's a real
+// problem — a malicious sibling app can read the cache without prompting,
+// and (combined with no fingerprint validation prior to review M3) plant
+// entries the user's gpg-agent will silently consume.
+//
+// New writes therefore go to the modern data-protection keychain
+// (kSecUseDataProtectionKeychain=true), where the ACL is enforced by
+// code signature: only an app with the same Developer Team ID + Bundle ID
+// can read the entry. Combined with `kSecAttrAccessible` set to
+// `WhenUnlockedThisDeviceOnly` and `kSecAttrSynchronizable=false`, the
+// entry is also (a) inaccessible while the device is locked and (b)
+// excluded from iCloud Keychain sync.
+//
+// On lookup we try the data-protection keychain first; if not found we
+// fall back to the legacy keychain (where pinentry-mac wrote and where
+// pre-review pinentry-darwin builds wrote). On a legacy hit we migrate:
+// re-store into the data-protection keychain and delete the legacy
+// entry. The migration is best-effort — if either step fails the original
+// bytes are still returned and the legacy entry stays put.
+//
+// The `useDataProtectionKeychain` flag exists so tests (which run as a
+// `swift test` binary that may not have a stable signing identity) can
+// stay on the legacy path without hitting errSecMissingEntitlement.
 
 import Foundation
 import Security
@@ -36,25 +63,153 @@ public struct KeychainStore: Sendable {
     /// against the developer's keychain without colliding with real entries.
     private let service: String
 
-    public init(service: String = "GnuPG") {
+    /// When true, new writes target the modern data-protection keychain
+    /// where the ACL is enforced by code signature. When false, all
+    /// operations go to the legacy file-based keychain (matches
+    /// pinentry-mac's wire-compatible layout exactly). Defaults to true
+    /// for production; tests pass false because a `swift test` binary is
+    /// often ad-hoc-signed and may not have a stable identity for the
+    /// data-protection keychain.
+    private let useDataProtectionKeychain: Bool
+
+    public init(
+        service: String = "GnuPG",
+        useDataProtectionKeychain: Bool = true
+    ) {
         self.service = service
+        self.useDataProtectionKeychain = useDataProtectionKeychain
     }
 
     // MARK: Lookup
 
     /// Look up the passphrase for `fingerprint`.
     ///
-    /// Returns nil on `errSecItemNotFound`. Throws `KeychainStoreError.userCanceled`
-    /// if the user denies the access prompt. Any other non-zero status throws
-    /// `.unexpectedStatus`.
+    /// Returns nil on `errSecItemNotFound` from BOTH backends. Throws
+    /// `KeychainStoreError.userCanceled` if the user denies an access prompt.
+    /// Any other non-zero status throws `.unexpectedStatus`.
+    ///
+    /// When `useDataProtectionKeychain` is true and a hit comes from the
+    /// legacy backend, migrates the entry to data-protection (re-store +
+    /// legacy delete) before returning. Migration is best-effort.
     public func lookup(fingerprint: String) throws -> SecureBytes? {
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: fingerprint,
-            kSecReturnData as String:  kCFBooleanTrue as Any,
-            kSecMatchLimit as String:  kSecMatchLimitOne,
+        // Try the configured primary backend.
+        if let bytes = try rawLookup(
+            fingerprint: fingerprint,
+            dataProtection: useDataProtectionKeychain
+        ) {
+            return bytes
+        }
+        // Migration: when primary is data-protection, also probe legacy
+        // (which is where pinentry-mac writes and where pre-H1 pinentry-darwin
+        // builds wrote). On hit, copy forward and delete the legacy entry.
+        if useDataProtectionKeychain,
+           let legacyBytes = try rawLookup(
+               fingerprint: fingerprint,
+               dataProtection: false
+           )
+        {
+            do {
+                try legacyBytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
+                    let secure = SecureBytes(copying: buf)
+                    try rawStore(
+                        fingerprint: fingerprint,
+                        label: nil,
+                        passphrase: secure,
+                        dataProtection: true
+                    )
+                }
+                // Only delete the legacy entry if the data-protection write
+                // succeeded; otherwise we'd lose the user's cached
+                // passphrase entirely.
+                try? rawClear(fingerprint: fingerprint, dataProtection: false)
+            } catch {
+                // Migration failed but the value is still good — return it.
+            }
+            return legacyBytes
+        }
+        return nil
+    }
+
+    // MARK: Store
+
+    /// Insert or update the passphrase entry for `fingerprint` in the
+    /// configured primary backend (data-protection keychain by default).
+    ///
+    /// If `label` is nil the service name ("GnuPG") is used (matches
+    /// KeychainSupport.m:46-47).
+    public func store(
+        fingerprint: String,
+        label: String?,
+        passphrase: SecureBytes
+    ) throws {
+        try rawStore(
+            fingerprint: fingerprint,
+            label: label,
+            passphrase: passphrase,
+            dataProtection: useDataProtectionKeychain
+        )
+    }
+
+    // MARK: Clear
+
+    /// Delete the entry for `fingerprint`. Idempotent: missing entries are
+    /// not an error. When the primary is the data-protection keychain we
+    /// also best-effort delete from the legacy keychain so a stale
+    /// pre-migration entry doesn't survive.
+    public func clear(fingerprint: String) throws {
+        try rawClear(fingerprint: fingerprint, dataProtection: useDataProtectionKeychain)
+        if useDataProtectionKeychain {
+            try? rawClear(fingerprint: fingerprint, dataProtection: false)
+        }
+    }
+
+    // MARK: - Internal raw operations (one specific backend per call)
+
+    /// Build the common subset of attributes used by every query against
+    /// the chosen backend.
+    private func baseQuery(
+        fingerprint: String,
+        dataProtection: Bool
+    ) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String:              kSecClassGenericPassword,
+            kSecAttrService as String:        service,
+            kSecAttrAccount as String:        fingerprint,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
         ]
+        if dataProtection {
+            query[kSecUseDataProtectionKeychain as String] = kCFBooleanTrue as Any
+        }
+        return query
+    }
+
+    /// Build the attributes used for an insert/update. Adds the data
+    /// payload, the label, and the WhenUnlockedThisDeviceOnly accessibility
+    /// constraint that prevents read-while-locked AND iCloud sync.
+    private func writeAttributes(
+        label: String,
+        data: CFData,
+        dataProtection: Bool
+    ) -> [String: Any] {
+        var attrs: [String: Any] = [
+            kSecAttrLabel as String:          label,
+            kSecValueData as String:          data,
+            kSecAttrAccessible as String:     kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
+        ]
+        if dataProtection {
+            attrs[kSecUseDataProtectionKeychain as String] = kCFBooleanTrue as Any
+        }
+        return attrs
+    }
+
+    private func rawLookup(
+        fingerprint: String,
+        dataProtection: Bool
+    ) throws -> SecureBytes? {
+        var query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+        query[kSecReturnData as String] = kCFBooleanTrue as Any
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var status = OSStatus(errSecSuccess)
         var item: CFTypeRef?
@@ -106,24 +261,19 @@ public struct KeychainStore: Sendable {
         return secure
     }
 
-    // MARK: Store
-
-    /// Insert or update the passphrase entry for `fingerprint`.
-    ///
-    /// If `label` is nil the service name ("GnuPG") is used (matches
-    /// KeychainSupport.m:46-47).
-    public func store(fingerprint: String, label: String?, passphrase: SecureBytes) throws {
+    private func rawStore(
+        fingerprint: String,
+        label: String?,
+        passphrase: SecureBytes,
+        dataProtection: Bool
+    ) throws {
         let resolvedLabel = label ?? service
 
         // First check whether an entry already exists. We do not request
         // kSecReturnData here, only existence — that avoids the auth prompt
         // when we are about to overwrite.
-        let probe: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: fingerprint,
-            kSecMatchLimit as String:  kSecMatchLimitOne,
-        ]
+        let probe = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+            .merging([kSecMatchLimit as String: kSecMatchLimitOne]) { _, new in new }
 
         var probeStatus = OSStatus(errSecSuccess)
         var attempts = 0
@@ -140,10 +290,11 @@ public struct KeychainStore: Sendable {
 
             if probeStatus == errSecSuccess {
                 // Update existing.
-                let attrs: [String: Any] = [
-                    kSecValueData as String: cfData,
-                    kSecAttrLabel as String: resolvedLabel,
-                ]
+                let attrs = writeAttributes(
+                    label: resolvedLabel,
+                    data: cfData,
+                    dataProtection: dataProtection
+                )
                 var status = OSStatus(errSecSuccess)
                 var tries = 0
                 repeat {
@@ -152,14 +303,15 @@ public struct KeychainStore: Sendable {
                 } while status == errSecAuthFailed && tries < 2
                 try Self.translate(status)
             } else if probeStatus == errSecItemNotFound {
-                // Add new.
-                let add: [String: Any] = [
-                    kSecClass as String:       kSecClassGenericPassword,
-                    kSecAttrService as String: service,
-                    kSecAttrAccount as String: fingerprint,
-                    kSecAttrLabel as String:   resolvedLabel,
-                    kSecValueData as String:   cfData,
-                ]
+                // Add new. Merge identity attributes with write attrs.
+                var add = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+                for (k, v) in writeAttributes(
+                    label: resolvedLabel,
+                    data: cfData,
+                    dataProtection: dataProtection
+                ) {
+                    add[k] = v
+                }
                 var status = OSStatus(errSecSuccess)
                 var tries = 0
                 repeat {
@@ -175,16 +327,11 @@ public struct KeychainStore: Sendable {
         }
     }
 
-    // MARK: Clear
-
-    /// Delete the entry for `fingerprint`. Idempotent: missing entries are
-    /// not an error.
-    public func clear(fingerprint: String) throws {
-        let query: [String: Any] = [
-            kSecClass as String:       kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: fingerprint,
-        ]
+    private func rawClear(
+        fingerprint: String,
+        dataProtection: Bool
+    ) throws {
+        let query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
 
         var status = OSStatus(errSecSuccess)
         var attempts = 0
