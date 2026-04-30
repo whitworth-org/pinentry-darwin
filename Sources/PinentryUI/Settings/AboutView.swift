@@ -55,8 +55,8 @@ public struct AboutView: View {
                     .foregroundStyle(Color.primary)
 
                 Link(
-                    "github.com/whitworth-org/pinentry-darwin",
-                    destination: URL(string: "https://github.com/whitworth-org/pinentry-darwin")!
+                    "github.com/whitworth/pinentry-darwin",
+                    destination: URL(string: "https://github.com/whitworth/pinentry-darwin")!
                 )
                 .font(Theme.bodyFont)
 
