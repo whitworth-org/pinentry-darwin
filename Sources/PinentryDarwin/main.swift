@@ -72,6 +72,15 @@ private func writeStdout(_ text: String) {
 
 @MainActor
 private func bootstrap() -> Never {
+    // Zero the core-dump rlimit before anything that might allocate a
+    // SecureBytes runs. mlock(2) prevents swap but does NOT inhibit core
+    // capture, so a crash mid-dialog without this line would dump live
+    // passphrase pages (and any String escape residue) to /cores/. Must
+    // be the first call so any panic from subsequent setup still hits a
+    // {0,0} limit.
+    var noCore = rlimit(rlim_cur: 0, rlim_max: 0)
+    _ = setrlimit(RLIMIT_CORE, &noCore)
+
     installSignalHandlers()
 
     let mode = parseArgs(CommandLine.arguments)
