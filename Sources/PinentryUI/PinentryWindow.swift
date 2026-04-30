@@ -98,6 +98,16 @@ public final class PinentryWindow: NSWindow {
         // Tabs make no sense for a modal pinentry.
         tabbingMode = .disallowed
 
+        // Opt the window out of WindowServer snapshot capture. Without
+        // this, Mission Control / Cmd-Tab / Dock minimise / Stage
+        // Manager preview thumbnails capture the live dialog contents —
+        // a plaintext leak when the user has Show typing enabled.
+        // `.transient` additionally keeps the window out of Spaces /
+        // Mission Control entirely; `.ignoresCycle` skips it from
+        // Cmd-` window cycling.
+        sharingType = .none
+        collectionBehavior = [.transient, .ignoresCycle]
+
         // Do NOT set `appearance` — leaving it nil makes the window
         // inherit `NSApp.effectiveAppearance` so System / Light / Dark
         // changes propagate live. The Settings appearance override is

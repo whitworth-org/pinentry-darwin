@@ -33,6 +33,20 @@ final class PinentryWindowTests: XCTestCase {
         XCTAssertTrue(win.styleMask.contains(.fullSizeContentView))
     }
 
+    // Snapshot suppression: WindowServer must not capture pinentry
+    // contents into Mission Control / Cmd-Tab thumbnails. With Show
+    // typing enabled, an unguarded snapshot would land plaintext in
+    // the per-user window cache.
+    func testSnapshotSuppressionConfigured() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        XCTAssertEqual(win.sharingType, .none,
+                       "sharingType must be .none so WindowServer skips snapshot capture")
+        XCTAssertTrue(win.collectionBehavior.contains(.transient),
+                      "collectionBehavior must include .transient")
+        XCTAssertTrue(win.collectionBehavior.contains(.ignoresCycle),
+                      "collectionBehavior must include .ignoresCycle")
+    }
+
     func testCloseButtonInterceptedWhenHandlerSet() {
         let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
         var fired = 0
