@@ -5,11 +5,26 @@
 // `SecureBytes`: `mmap`, `mlock`, `munlock`, `munmap`, and the C11 Annex K
 // `memset_s` (which the optimiser is forbidden from eliminating).
 //
-// All wrappers report failure via `errno`. None of them log; callers decide
-// what to do (typically: `mlock` failure is best-effort, the rest trap).
+// All wrappers report failure via `errno`. The mlock wrapper additionally
+// emits a one-shot os_log warning on the first failure so a host where
+// RLIMIT_MEMLOCK is exhausted does not silently page secrets to swap.
 
 import Darwin
 import Foundation
+import os
+
+/// Process-wide logger for the secure-memory subsystem. Used only on
+/// failure paths; the success path stays silent.
+private let secureLogger = Logger(
+    subsystem: "org.whitworth.pinentry-darwin",
+    category: "secure"
+)
+
+/// One-shot guard so we emit at most one mlock-failure log per process.
+/// Once mlock starts failing (RLIMIT_MEMLOCK exhausted, kernel denial,
+/// sandbox), subsequent SecureBytes allocations will keep failing the
+/// same way — flooding the log adds no diagnostic value.
+private let mlockWarnFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
 
 /// Errors thrown by the page-level allocator. `mmap` failure is the only fatal
 /// one — without a backing buffer there is nothing the caller can do.
@@ -81,8 +96,26 @@ func secureMunmap(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
 /// the lock failed — typically `EPERM` (no privileges) or `ENOMEM`
 /// (RLIMIT_MEMLOCK exhausted). Callers should record the result so `deinit`
 /// only `munlock`s a region that was actually locked.
+///
+/// On the FIRST failure per process, emits a single os_log warning so an
+/// operator can correlate "secrets paged to swap" with the underlying
+/// resource-limit condition. Subsequent failures stay silent.
 func secureMlock(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
-    return mlock(ptr, bytes) == 0
+    let ok = mlock(ptr, bytes) == 0
+    if !ok {
+        let lockErr = errno
+        let alreadyWarned = mlockWarnFlag.withLock { state -> Bool in
+            let was = state
+            state = true
+            return was
+        }
+        if !alreadyWarned {
+            secureLogger.error(
+                "mlock failed (errno=\(lockErr, privacy: .public)); secret pages may be written to swap. Raise RLIMIT_MEMLOCK or run with elevated privileges."
+            )
+        }
+    }
+    return ok
 }
 
 /// Counterpart to `secureMlock`. Returns `true` on success. Callers should

@@ -81,6 +81,19 @@ private func bootstrap() -> Never {
     var noCore = rlimit(rlim_cur: 0, rlim_max: 0)
     _ = setrlimit(RLIMIT_CORE, &noCore)
 
+    // Try to raise the memlock soft limit toward 1 MiB so SecureBytes
+    // can mlock its mappings. The macOS default for unprivileged
+    // processes (and whatever gpg-agent inherits to us) is typically
+    // tiny — when it's exhausted, SecureBytes silently allocates
+    // anonymous-but-unlocked pages and secrets become swap-eligible.
+    // Best-effort: failure is non-fatal (Locking.swift logs once on
+    // the first mlock that doesn't take).
+    var memlim = rlimit(rlim_cur: 0, rlim_max: 0)
+    if getrlimit(RLIMIT_MEMLOCK, &memlim) == 0 {
+        memlim.rlim_cur = min(memlim.rlim_max, rlim_t(1 << 20))
+        _ = setrlimit(RLIMIT_MEMLOCK, &memlim)
+    }
+
     installSignalHandlers()
 
     let mode = parseArgs(CommandLine.arguments)
