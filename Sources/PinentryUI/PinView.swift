@@ -328,6 +328,16 @@ public struct PinView: View {
     /// SecureField (or TextField when revealed via the Show typing
     /// checkbox) using the canonical macOS rounded-border style for
     /// guaranteed input handling.
+    ///
+    /// We intercept binding writes via a wrapper Binding so the model's
+    /// `setPin(from:)` fires *synchronously* on every keystroke. The
+    /// previous implementation observed `.onChange(of: binding.wrappedValue)`
+    /// on the enclosing Group, which on macOS Sequoia debounced or
+    /// dropped SecureField writes — the symptom was OK staying disabled
+    /// until the user toggled Show typing (which re-rendered the field
+    /// hierarchy and back-filled the model on rebuild). Wrapping the
+    /// binding makes the side-effect deterministic, regardless of which
+    /// field type is currently mounted or how SwiftUI batches updates.
     @ViewBuilder
     private func pinField(
         binding: Binding<String>,
@@ -335,23 +345,25 @@ public struct PinView: View {
         accessibilityLabel: String,
         focus: PinField
     ) -> some View {
-        Group {
-            if model.showTyping {
-                TextField("", text: binding)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Theme.inputFont)
-                    .focused($focusedField, equals: focus)
-                    .accessibilityLabel(Text(verbatim: accessibilityLabel))
-            } else {
-                SecureField("", text: binding)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Theme.inputFont)
-                    .focused($focusedField, equals: focus)
-                    .accessibilityLabel(Text(verbatim: accessibilityLabel))
+        let intercepted = Binding<String>(
+            get: { binding.wrappedValue },
+            set: { newValue in
+                binding.wrappedValue = newValue
+                onChange(newValue)
             }
-        }
-        .onChange(of: binding.wrappedValue) { _, newValue in
-            onChange(newValue)
+        )
+        if model.showTyping {
+            TextField("", text: intercepted)
+                .textFieldStyle(.roundedBorder)
+                .font(Theme.inputFont)
+                .focused($focusedField, equals: focus)
+                .accessibilityLabel(Text(verbatim: accessibilityLabel))
+        } else {
+            SecureField("", text: intercepted)
+                .textFieldStyle(.roundedBorder)
+                .font(Theme.inputFont)
+                .focused($focusedField, equals: focus)
+                .accessibilityLabel(Text(verbatim: accessibilityLabel))
         }
     }
 }
