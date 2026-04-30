@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Ryan Whitworth.
 //
-// PinView.swift — the SwiftUI body for `GETPIN`. See PinViewModel for the
-// String/SecureBytes-residue caveat.
+// PinView.swift — the SwiftUI body for `GETPIN`.
 //
-// Layout direction: refined minimalism with security-craft sensibility
-// (see Theme.swift). One iconographic anchor at the top, strict
-// typographic hierarchy, the OK button is the only saturated control,
-// and a single 220ms ease-out fade-and-rise on appear. The "Show
-// typing" affordance lives as an eye/eye.slash button inside each
-// passphrase field — the 1Password-style placement that keeps the
-// chrome density honest.
+// Layout direction (post-pinentry-mac-comparison): landscape dialog with
+// a large iconographic anchor on the LEFT and the content stack on the
+// RIGHT. Mirrors pinentry-mac's information-density (which the user
+// validated as "the correct window size") while replacing pinentry-mac's
+// dated padlock illustration with a modern SF Symbol and trimming the
+// titlebar text. PIN label is inline with the field; Show typing is a
+// checkbox indented under the field.
+//
+// See PinViewModel for the SwiftUI String / SecureBytes residue caveat.
 
 import Observation
 import SwiftUI
@@ -34,10 +35,6 @@ public struct PinView: View {
     @State private var pinText: String = ""
     @State private var repeatText: String = ""
 
-    /// Drives the SecureField↔TextField swap inside `pinField`. Replaces
-    /// the old `Toggle("Show typing")` checkbox.
-    @State private var revealTyping: Bool = false
-
     /// Drives the entrance animation (alpha 0→1, translateY 8→0).
     @State private var appeared: Bool = false
 
@@ -58,14 +55,13 @@ public struct PinView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: Theme.mediumPadding) {
-            headerBlock
-            inputBlock
-            optionsBlock
-            buttonRow
+        // Two-column landscape layout: hero icon left, content stack right.
+        HStack(alignment: .top, spacing: Theme.blockPadding) {
+            heroIcon
+            contentColumn
         }
         .padding(.horizontal, Theme.largePadding)
-        .padding(.vertical, Theme.mediumPadding)
+        .padding(.vertical, Theme.blockPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : Theme.entranceTranslate)
@@ -78,14 +74,9 @@ public struct PinView: View {
                 skeActive = true
             }
 
-            // Initialize showTyping from the model (settings preference).
-            revealTyping = model.showTyping
-
             // Seed focus synchronously. SwiftUI defers @FocusState
             // application until after the view tree is committed, so
-            // setting it in onAppear's body is sufficient — no Task
-            // delay needed (the previous async sleep was racy and
-            // sometimes left the field unfocused).
+            // setting it in onAppear's body is sufficient.
             focusedField = .pin
 
             withAnimation(.easeOut(duration: Theme.entranceDuration)) {
@@ -102,39 +93,37 @@ public struct PinView: View {
                 skeActive = false
             }
         }
-        .onChange(of: revealTyping) { _, newValue in
-            // Mirror to the model so the Settings preference flows out
-            // through the same observable surface.
-            model.showTyping = newValue
-        }
     }
 
     // MARK: - Sub-blocks
 
-    /// Top: icon + title side-by-side, with description and (optional)
-    /// fingerprint stacked below. Horizontal icon-title pairing saves
-    /// ~32pt of vertical space versus the previous stacked layout while
-    /// still giving the dialog a clear iconographic anchor.
+    /// Left column: oversized SF Symbol acting as the dialog's identity.
+    /// Sized to anchor against the title + multi-line description.
     @ViewBuilder
-    private var headerBlock: some View {
+    private var heroIcon: some View {
+        Image(systemName: "lock.shield.fill")
+            .font(.system(size: Theme.heroIconSize, weight: .regular))
+            .foregroundStyle(Theme.accent)
+            .frame(width: Theme.heroIconSize + 8, alignment: .top)
+            .accessibilityHidden(true)
+    }
+
+    /// Right column: title → description → input row → indented options →
+    /// button row. Fills the remaining width.
+    @ViewBuilder
+    private var contentColumn: some View {
         VStack(alignment: .leading, spacing: Theme.smallPadding) {
 
-            HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding + 2) {
-                Image(systemName: "lock.shield.fill")
-                    .font(.system(size: Theme.headerIconSize, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .accessibilityHidden(true)
-
-                if let title = spec.title, !title.isEmpty {
-                    Text(title)
-                        .font(Theme.titleFont)
-                        .foregroundStyle(Color.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+            // Title (SETTITLE) — primary heading.
+            if let title = spec.title, !title.isEmpty {
+                Text(title)
+                    .font(Theme.titleFont)
+                    .foregroundStyle(Color.primary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            // SETERROR text, if any. The most urgent thing on screen
-            // when present, so we keep it adjacent to the title.
+            // SETERROR text, if any. Most urgent thing on screen when
+            // present, kept adjacent to the title.
             if let err = spec.error, !err.isEmpty {
                 Text(err)
                     .font(Theme.bodyFont)
@@ -142,22 +131,56 @@ public struct PinView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
+            // SETDESC text. Multi-line: gpg-agent often packs Number /
+            // Holder / Counter rows into a single description for card
+            // dialogs, separated by newlines. We render verbatim so the
+            // rich smartcard context shows up the same way pinentry-mac
+            // displays it.
             if let desc = spec.description, !desc.isEmpty {
                 Text(desc)
                     .font(Theme.bodyFont)
                     .foregroundStyle(Color.primary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
 
+            // SETKEYINFO fingerprint, when supplied (non-card flows).
+            // Rendered monospace so users can compare hex digit-for-digit.
             if case let .key(mode, fpr) = spec.keyInfo {
-                let label = formatKeyInfoLabel(mode: mode, fingerprint: fpr)
-                Text(label)
+                Text(formatKeyInfoLabel(mode: mode, fingerprint: fpr))
                     .font(Theme.monospacedFont)
                     .foregroundStyle(Color.secondary)
                     .textSelection(.enabled)
                     .accessibilityLabel(Text("Key fingerprint \(fpr)"))
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // PIN input row: prompt label inline with the field. Matches
+            // pinentry-mac's "PIN  [____________]" affordance.
+            inputRow
+
+            // Optional repeat field (SETREPEAT).
+            if let repeatPrompt = spec.repeatPrompt {
+                repeatRow(label: repeatPrompt)
+
+                if !model.pinsMatch && model.repeatLength > 0 {
+                    Text(spec.repeatError ?? "Passphrases do not match.")
+                        .font(Theme.captionFont)
+                        .foregroundStyle(Theme.errorText)
+                        .padding(.leading, Theme.fieldLabelColumnWidth + Theme.smallPadding)
+                        .transition(.opacity)
+                }
+            }
+
+            // Indented options row: Show typing toggle (and optional
+            // Save in Keychain checkbox). Indented by the same column
+            // width as the field so the controls visually align under
+            // the input.
+            optionsRow
+
+            Spacer(minLength: 0)
+
+            buttonRow
         }
     }
 
@@ -169,23 +192,18 @@ public struct PinView: View {
     ///     canonical `gpg --fingerprint` output style).
     ///   - Mode 'c' (card-resident key) prefixes "Card key:".
     ///   - Other modes ('n' normal, 's' ssh, 'o' obsolete) render
-    ///     without prefix; the fingerprint is identifying enough.
-    ///   - Non-40-char fingerprints (e.g. shorter long-key-IDs) pass
-    ///     through unformatted.
+    ///     without prefix.
     private func formatKeyInfoLabel(mode: Character, fingerprint fpr: String) -> String {
-        let formatted: String
         let hex = fpr.uppercased()
+        let formatted: String
         if hex.count == 40, hex.allSatisfy(\.isHexDigit) {
-            // Build groups of 4 with double space between groups 5 and 6.
             var pieces: [String] = []
             for chunkStart in stride(from: 0, to: 40, by: 4) {
                 let lo = hex.index(hex.startIndex, offsetBy: chunkStart)
                 let hi = hex.index(lo, offsetBy: 4)
                 pieces.append(String(hex[lo..<hi]))
             }
-            let firstHalf = pieces.prefix(5).joined(separator: " ")
-            let secondHalf = pieces.suffix(5).joined(separator: " ")
-            formatted = "\(firstHalf)  \(secondHalf)"
+            formatted = pieces.prefix(5).joined(separator: " ") + "  " + pieces.suffix(5).joined(separator: " ")
         } else {
             formatted = fpr
         }
@@ -196,14 +214,16 @@ public struct PinView: View {
         }
     }
 
-    /// Middle: prompt label, input field with in-field eye toggle,
-    /// optional repeat field, optional mismatch hint.
+    /// Prompt label + field on the same row. Label is right-aligned in a
+    /// fixed-width column so multi-row labels (e.g. with a repeat field)
+    /// stay vertically aligned.
     @ViewBuilder
-    private var inputBlock: some View {
-        VStack(alignment: .leading, spacing: Theme.smallPadding) {
+    private var inputRow: some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding) {
             Text(spec.resolvedPrompt)
                 .font(Theme.bodyFont)
                 .foregroundStyle(Color.primary)
+                .frame(width: Theme.fieldLabelColumnWidth, alignment: .trailing)
 
             pinField(
                 binding: $pinText,
@@ -211,44 +231,48 @@ public struct PinView: View {
                 accessibilityLabel: spec.resolvedPrompt,
                 focus: .pin
             )
+        }
+        .padding(.top, Theme.smallPadding)
+    }
 
-            if let repeatPrompt = spec.repeatPrompt {
-                Text(repeatPrompt)
-                    .font(Theme.bodyFont)
-                    .foregroundStyle(Color.primary)
-                    .padding(.top, Theme.smallPadding)
+    @ViewBuilder
+    private func repeatRow(label: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding) {
+            Text(label)
+                .font(Theme.bodyFont)
+                .foregroundStyle(Color.primary)
+                .frame(width: Theme.fieldLabelColumnWidth, alignment: .trailing)
 
-                pinField(
-                    binding: $repeatText,
-                    onChange: { model.setRepeat(from: $0) },
-                    accessibilityLabel: repeatPrompt,
-                    focus: .repeatPin
-                )
-
-                if !model.pinsMatch && model.repeatLength > 0 {
-                    Text(spec.repeatError ?? "Passphrases do not match.")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Theme.errorText)
-                        .transition(.opacity)
-                }
-            }
+            pinField(
+                binding: $repeatText,
+                onChange: { model.setRepeat(from: $0) },
+                accessibilityLabel: label,
+                focus: .repeatPin
+            )
         }
     }
 
-    /// "Save in Keychain" toggle (when SETKEYINFO + allow-cache OPTION).
-    /// Renders nothing when the dialog has no Keychain affordance.
+    /// Show typing toggle, indented under the input field. Optionally
+    /// joined by the Save in Keychain checkbox when the dialog has a
+    /// Keychain affordance.
     @ViewBuilder
-    private var optionsBlock: some View {
-        if spec.allowKeychainSave {
-            Toggle("Save in Keychain", isOn: $model.saveToKeychain)
+    private var optionsRow: some View {
+        HStack(spacing: Theme.blockPadding) {
+            Toggle("Show typing", isOn: $model.showTyping)
                 .toggleStyle(.checkbox)
                 .font(Theme.bodyFont)
+
+            if spec.allowKeychainSave {
+                Toggle("Save in Keychain", isOn: $model.saveToKeychain)
+                    .toggleStyle(.checkbox)
+                    .font(Theme.bodyFont)
+            }
         }
+        .padding(.leading, Theme.fieldLabelColumnWidth + Theme.smallPadding)
     }
 
     /// Bottom: Cancel / [NotOK] / OK, right-aligned. OK is the only
-    /// saturated control in the dialog (`.borderedProminent`) and is
-    /// disabled until canSubmit.
+    /// saturated control in the dialog and is disabled until canSubmit.
     @ViewBuilder
     private var buttonRow: some View {
         HStack(spacing: Theme.smallPadding) {
@@ -257,16 +281,15 @@ public struct PinView: View {
                 model.cancel()
             }
             .keyboardShortcut(.cancelAction)
-            .controlSize(.large)
+            .controlSize(.regular)
 
             if let notOK = spec.notOKLabel, !notOK.isEmpty {
                 Button(notOK) {
                     // NotOK on a GETPIN is unusual but the protocol
                     // permits it. Treated as a non-confirmation result.
-                    // The coordinator translates it to ERR NOT_CONFIRMED.
                     model.cancel()
                 }
-                .controlSize(.large)
+                .controlSize(.regular)
             }
 
             Button {
@@ -290,15 +313,11 @@ public struct PinView: View {
         }
     }
 
-    // MARK: - In-field eye toggle
+    // MARK: - Field
 
-    /// SecureField (or TextField when revealed) using the canonical macOS
-    /// rounded-border style for guaranteed input handling, plus an eye
-    /// button beside it. The previous in-field-eye attempt with
-    /// `.textFieldStyle(.plain)` rendered correctly but suffered from a
-    /// known macOS SwiftUI quirk where SecureField + plain style doesn't
-    /// reliably gain firstResponder, so typing was ignored. Standard
-    /// rounded-border styling avoids that whole bug class.
+    /// SecureField (or TextField when revealed via the Show typing
+    /// checkbox) using the canonical macOS rounded-border style for
+    /// guaranteed input handling.
     @ViewBuilder
     private func pinField(
         binding: Binding<String>,
@@ -306,8 +325,8 @@ public struct PinView: View {
         accessibilityLabel: String,
         focus: PinField
     ) -> some View {
-        HStack(spacing: Theme.smallPadding) {
-            if revealTyping {
+        Group {
+            if model.showTyping {
                 TextField("", text: binding)
                     .textFieldStyle(.roundedBorder)
                     .font(Theme.inputFont)
@@ -320,22 +339,6 @@ public struct PinView: View {
                     .focused($focusedField, equals: focus)
                     .accessibilityLabel(Text(accessibilityLabel))
             }
-
-            Button {
-                revealTyping.toggle()
-                // Keep focus on the field after the toggle so the next
-                // keystroke still lands in the input rather than the button.
-                focusedField = focus
-            } label: {
-                Image(systemName: revealTyping ? "eye.slash" : "eye")
-                    .font(.system(size: Theme.inlineIconSize))
-                    .foregroundStyle(Color.secondary)
-                    .frame(width: 22, height: 22)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help(revealTyping ? "Hide typing" : "Show typing")
-            .accessibilityLabel(Text(revealTyping ? "Hide passphrase" : "Show passphrase"))
         }
         .onChange(of: binding.wrappedValue) { _, newValue in
             onChange(newValue)

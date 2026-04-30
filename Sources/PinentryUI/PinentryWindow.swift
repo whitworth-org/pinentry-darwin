@@ -21,18 +21,19 @@ import AppKit
 @MainActor
 public final class PinentryWindow: NSWindow {
 
-    /// Lower bound. Below this the dialog feels cramped on any display.
-    public static let minWidth: CGFloat = 480
+    /// Lower bound. Below this the description column gets too narrow
+    /// for the smartcard-info multi-line content.
+    public static let minWidth: CGFloat = 680
 
-    /// Upper bound. Above this the dialog feels stretched even on 5K+;
-    /// past this the line measure for the description becomes too wide
-    /// for comfortable reading.
-    public static let maxWidth: CGFloat = 760
+    /// Upper bound. Above this the line measure for the description
+    /// becomes too wide for comfortable reading even on 4K/5K hosts.
+    public static let maxWidth: CGFloat = 840
 
-    /// Fraction of the screen's visible width to occupy. 0.34 lands at
-    /// ~514pt on a 1512pt-wide 14" laptop and clamps to 760pt on 4K/5K
-    /// — generous on Retina+ without becoming dominant.
-    private static let screenFraction: CGFloat = 0.34
+    /// Fraction of the screen's visible width to occupy. 0.48 lands at
+    /// ~726pt on a 1512pt-wide 14" laptop and clamps to 840pt on
+    /// 4K/5K — landscape proportions, halfway between pinentry-mac's
+    /// original ~480pt and the doubled ~960pt.
+    private static let screenFraction: CGFloat = 0.48
 
     /// Width of the next pinentry dialog, computed against the supplied
     /// screen (or `NSScreen.main`). Always lands in `[minWidth, maxWidth]`,

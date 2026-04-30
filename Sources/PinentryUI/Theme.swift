@@ -65,12 +65,25 @@ public enum Theme {
     // anchors to a fixed point value so it doesn't drift relative to
     // typography on appearance/scale changes.
 
-    /// Header SF Symbol point size. Renders ~32pt visually, scales for
-    /// Retina automatically.
+    /// Header SF Symbol point size for views (Confirm/Message) where the
+    /// icon sits inline above the title. Renders ~32pt visually.
     public static let headerIconSize: CGFloat = 32
+
+    /// Hero SF Symbol point size for the GETPIN dialog's left-column
+    /// anchor. Sized to balance against a multi-line description block
+    /// (matches the visual weight of pinentry-mac's padlock illustration).
+    public static let heroIconSize: CGFloat = 56
 
     /// Inline accessory icons (eye toggle, info adornments).
     public static let inlineIconSize: CGFloat = 14
+
+    // MARK: - Layout columns
+
+    /// Fixed width of the prompt-label column in the GETPIN input row.
+    /// Holds "Passphrase:" / "Repeat:" / localised equivalents on a
+    /// single line at our body font; right-aligned so the field lines up
+    /// across rows.
+    public static let fieldLabelColumnWidth: CGFloat = 84
 
     // MARK: - Motion
     //
