@@ -407,18 +407,18 @@ final class AssuanLoop {
         }
     }
 
-    /// Encode an ASCII info string into a SecureBytes-backed `D` line + OK.
-    /// We use SecureBytes because that's the only `Response.data` payload
-    /// type; the bytes here are not secret but the wrapper is harmless.
+    /// Encode an ASCII info string into a `D` line + OK. The payload is
+    /// non-secret (GETINFO version, pid, ttyinfo) so we route through
+    /// `Response.dataPlaintext(_ Data)` instead of allocating an
+    /// mlock'd SecureBytes for it. Architecturally distinct from the
+    /// `Response.data(SecureBytes)` path so a code reviewer can spot
+    /// any future regression that puts a secret on the plaintext path.
     private func sendInfoLine(_ value: String) async {
-        let bytes = Array(value.utf8)
-        if bytes.isEmpty {
-            // SecureBytes requires non-empty; emit OK only.
+        if value.isEmpty {
             await reply(.ok)
             return
         }
-        let secure = SecureBytes(bytes)
-        await reply(.data(secure))
+        await reply(.dataPlaintext(Data(value.utf8)))
         await reply(.ok)
     }
 

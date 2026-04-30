@@ -22,7 +22,16 @@ import SecureMemory
 public enum Response: Sendable {
     case ok
     case okWithComment(String)
+    /// `D <escaped-bytes>` for SECRET payloads. Backed by SecureBytes
+    /// (mlock'd, deinit-zeroed). Use this for any value whose plaintext
+    /// must not linger in unwiped heap.
     case data(SecureBytes)
+    /// `D <escaped-bytes>` for NON-SECRET payloads (GETINFO version,
+    /// pid, ttyinfo, etc.). Backed by a plain `Data` so we don't waste
+    /// an mlock'd page on bytes that aren't sensitive. Architecturally
+    /// distinct from `data(SecureBytes)` so a code reviewer can spot a
+    /// secret being routed through the wrong constructor.
+    case dataPlaintext(Data)
     case status(keyword: String, parameters: String)
     case err(code: UInt32, message: String)
     case comment(String)
@@ -75,6 +84,9 @@ extension Response {
 
         case .data(let secure):
             return [encodeDataLine(secure)]
+
+        case .dataPlaintext(let data):
+            return [encodePlaintextDataLine(data)]
         }
     }
 
@@ -114,5 +126,26 @@ extension Response {
             d.append(0x0A) // LF
             return d
         }
+    }
+
+    /// Encode a `D` line for non-secret payload (GETINFO replies). Same
+    /// wire format as `encodeDataLine(_ secure:)` but the input buffer
+    /// is a regular `Data` — there is no need to allocate (and waste an
+    /// mlock page on) a SecureBytes for bytes that are not sensitive.
+    private func encodePlaintextDataLine(_ payload: Data) -> Data {
+        var d = Data()
+        d.reserveCapacity(2 + payload.count * 3 + 1)
+        d.append(0x44) // 'D'
+        d.append(0x20) // ' '
+        if payload.count > 0 {
+            payload.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+                guard let base = raw.baseAddress else { return }
+                let typed = base.assumingMemoryBound(to: UInt8.self)
+                let view = UnsafeBufferPointer<UInt8>(start: typed, count: payload.count)
+                LineCodec.escapeForDataLine(view, into: &d)
+            }
+        }
+        d.append(0x0A) // LF
+        return d
     }
 }
