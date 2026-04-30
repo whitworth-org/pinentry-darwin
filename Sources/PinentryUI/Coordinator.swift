@@ -37,7 +37,7 @@ public final class PinentryCoordinator {
 
     /// One-shot resolver: forwards the first incoming result and ignores
     /// the rest. We share a single `Resolver` between the view-model
-    /// callback, the close-button handler, and the timeout task so any
+    /// callback, the close-button handler, and the timeout timer so any
     /// of the three paths can win.
     @MainActor
     private final class Resolver {
@@ -46,6 +46,11 @@ public final class PinentryCoordinator {
         // ordered-in, but holding our own ref until resolution is
         // defensive against early dealloc.
         var window: NSWindow?
+        /// Timeout source. Timer is RunLoop-driven so it fires reliably
+        /// from inside `NSApp.runModal`'s event loop; a Task with
+        /// `Task.sleep` would compete with the modal's main-actor
+        /// hold and could delay or fail to fire.
+        var timeoutTimer: Timer?
 
         init(_ continuation: CheckedContinuation<DialogResult, Never>) {
             self.continuation = continuation
@@ -54,7 +59,16 @@ public final class PinentryCoordinator {
         func resolve(_ result: DialogResult) {
             guard let cont = continuation else { return }
             continuation = nil
+            timeoutTimer?.invalidate()
+            timeoutTimer = nil
             cont.resume(returning: result)
+            // End the modal session BEFORE closing the window so the
+            // run-loop returns from `runModal(for:)` cleanly. Closing
+            // the window first works (close → abortModal under the
+            // hood) but the explicit stopModal makes the contract
+            // unambiguous and survives any future close-handling
+            // refactor.
+            NSApp.stopModal()
             // Mark dismissal as resolver-driven before closing so
             // PinentryWindow.close() doesn't re-fire onCloseRequested.
             if let pw = window as? PinentryWindow {
@@ -120,20 +134,40 @@ public final class PinentryCoordinator {
 
         // Position + present. Centre, then bring forward.
         window.center()
-        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
         // Apply timeout if requested. SETTIMEOUT 0 means "no timeout".
+        // Timer (not Task.sleep) so the source is RunLoop-pumped under
+        // NSApp.runModal — the modal session does not reliably yield
+        // the main-actor scheduler that backs Task.sleep, so a Task
+        // would risk firing late or not at all.
         if let seconds = spec.timeoutSeconds, seconds > 0 {
-            // Task inherits MainActor isolation from the surrounding
-            // @MainActor function in Swift 6, so resolver.resolve is
-            // safe to call directly after the sleep.
-            Task { @MainActor [resolver] in
-                let ns = UInt64(seconds) * 1_000_000_000
-                try? await Task.sleep(nanoseconds: ns)
-                resolver.resolve(.timedOut)
+            let timer = Timer.scheduledTimer(
+                withTimeInterval: TimeInterval(seconds),
+                repeats: false
+            ) { [resolver] _ in
+                MainActor.assumeIsolated {
+                    resolver.resolve(.timedOut)
+                }
             }
+            resolver.timeoutTimer = timer
         }
+
+        // Drive a true app-modal session. Compared to the previous
+        // `makeKeyAndOrderFront` + `.floating` posture, this:
+        //   * disables event delivery to other windows belonging to
+        //     this process (no-op for pinentry-darwin since we own
+        //     exactly one window — but the contract is explicit);
+        //   * presents to AT/AX as a modal rather than a floating
+        //     auxiliary, which is the correct semantic for a
+        //     passphrase prompt;
+        //   * blocks here until `Resolver.resolve` calls
+        //     `NSApp.stopModal()` (or the user closes the window,
+        //     which `abortModal`s automatically).
+        // SwiftUI button handlers and our Timer both fire from the
+        // main run loop while runModal is pumping, which is what
+        // delivers the result that ends the session.
+        NSApp.runModal(for: window)
     }
 
     /// Apply the theme override (if any). System mode never sets
