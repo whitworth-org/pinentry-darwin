@@ -94,17 +94,18 @@ public actor Session {
     /// Send `INQUIRE QUALITY <escaped-bytes>` and read back the response.
     /// Returns the integer carried on the resulting `D` line, clamped to
     /// the conventional [-100, 100] range. The `candidate` bytes never
-    /// leave `SecureBytes` except as their escaped wire form.
+    /// leave `SecureBytes` except as their escaped wire form — the
+    /// escaping is appended directly into the wire-output `Data`, no
+    /// intermediate `Swift.String` materialises.
     public func inquireQuality(_ candidate: SecureBytes) async throws -> Int {
         // Build "INQUIRE QUALITY <escaped>\n" inside the secure buffer's
         // unsafe-bytes scope. The intermediate `Data` carries the *escaped*
         // form, which is the value about to be transmitted on the wire.
         let line: Data = candidate.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> Data in
-            let escaped = LineCodec.escape(buf)
             var d = Data()
-            d.reserveCapacity(16 + escaped.utf8.count + 1)
+            d.reserveCapacity(16 + buf.count * 3 + 1)
             d.append(contentsOf: "INQUIRE QUALITY ".utf8)
-            d.append(contentsOf: escaped.utf8)
+            LineCodec.escape(buf, into: &d)
             d.append(0x0A)
             return d
         }

@@ -176,4 +176,56 @@ final class LineCodecTests: XCTestCase {
             XCTAssertEqual(decoded, original, "byte 0x\(String(v, radix: 16)) failed D-line round-trip")
         }
     }
+
+    // MARK: Byte-output (no Swift.String materialisation)
+
+    // Production callers (Response.encodeDataLine, Session.inquireQuality)
+    // route through escape(_:into:) and escapeForDataLine(_:into:) so the
+    // escaped bytes never live in unwiped Swift.String storage. The test
+    // here pins those byte-output variants so a future regression that
+    // accidentally drops them shows up immediately.
+
+    func testEscapeIntoDataMatchesStringForm() {
+        let bytes = Array("hello world+%\u{0009}".utf8)
+        var out = Data()
+        bytes.withUnsafeBufferPointer { LineCodec.escape($0, into: &out) }
+        let asString = String(decoding: out, as: UTF8.self)
+        let stringForm = bytes.withUnsafeBufferPointer { LineCodec.escape($0) }
+        XCTAssertEqual(asString, stringForm,
+                       "byte-output and String-output variants must produce identical bytes")
+    }
+
+    func testEscapeForDataLineIntoDataMatchesStringForm() {
+        let bytes = Array("password with + and % and \u{0007}".utf8)
+        var out = Data()
+        bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0, into: &out) }
+        let asString = String(decoding: out, as: UTF8.self)
+        let stringForm = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        XCTAssertEqual(asString, stringForm)
+    }
+
+    func testEscapeIntoDataAppendsToExistingPrefix() {
+        // Production callers pre-fill the wire prefix ("D ", "INQUIRE
+        // QUALITY ") before calling the escape function. Confirm the
+        // byte-output escaper appends rather than replacing.
+        var out = Data()
+        out.append(contentsOf: "D ".utf8)
+        let bytes = Array("hi".utf8)
+        bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0, into: &out) }
+        out.append(0x0A)
+        XCTAssertEqual(String(decoding: out, as: UTF8.self), "D hi\n")
+    }
+
+    func testEscapeIntoDataAllByteValuesRoundTrip() throws {
+        // Spot-check the byte-output path against the every-byte invariant
+        // so a regression in the inner appendEscaped(into: Data) helper is
+        // caught even if the String-returning convenience drifts away.
+        for v in 0...255 {
+            let original: [UInt8] = [UInt8(v)]
+            var out = Data()
+            original.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0, into: &out) }
+            let decoded = try LineCodec.unescapeFromDataLine(String(decoding: out, as: UTF8.self))
+            XCTAssertEqual(decoded, original, "byte 0x\(String(v, radix: 16)) failed byte-output round-trip")
+        }
+    }
 }

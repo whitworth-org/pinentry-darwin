@@ -94,11 +94,11 @@ extension Response {
 
     /// Encode a `D` line carrying SecureBytes payload. Worst-case length is
     /// 2 (for "D ") + 3 * payloadCount (every byte escaped) + 1 (LF).
-    /// We construct the whole thing in a `Data` whose contents come from
-    /// the secure buffer — the bytes that end up in the returned `Data`
-    /// are the *escaped* form, which is the value that is about to go on
-    /// the wire anyway. We deliberately do not retain the SecureBytes
-    /// outside the closure.
+    /// The escape pipeline writes directly into the wire-output `Data`:
+    /// no intermediate `Swift.String` ever holds the escaped bytes
+    /// (which, for the common ASCII-passphrase case, are byte-identical
+    /// to the plaintext). The `Data` IS the value about to go on the
+    /// wire and is dropped immediately after `writeAll`.
     private func encodeDataLine(_ secure: SecureBytes) -> Data {
         // CRITICAL: data-line escaping must NOT remap space → '+'. The
         // '+' substitution is a command-argument convention only; per the
@@ -106,12 +106,11 @@ extension Response {
         // command-arg encoder here would corrupt any passphrase that
         // contained a space.
         return secure.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> Data in
-            let escaped = LineCodec.escapeForDataLine(buf)
             var d = Data()
-            d.reserveCapacity(2 + escaped.utf8.count + 1)
+            d.reserveCapacity(2 + buf.count * 3 + 1)
             d.append(0x44) // 'D'
             d.append(0x20) // ' '
-            d.append(contentsOf: escaped.utf8)
+            LineCodec.escapeForDataLine(buf, into: &d)
             d.append(0x0A) // LF
             return d
         }

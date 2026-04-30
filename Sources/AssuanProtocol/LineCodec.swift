@@ -52,15 +52,29 @@ public enum LineCodec {
     /// Percent-escape a buffer of raw bytes into an Assuan-safe ASCII string.
     /// Always succeeds; the caller is responsible for ensuring the resulting
     /// string fits within `maxLineLength` if the line will be transmitted.
+    ///
+    /// SECURITY: this convenience materialises the escaped form as a
+    /// `Swift.String`, which is regular non-locked, non-zeroed heap. Do
+    /// **not** call this with secret bytes — use the `into:` variant
+    /// below so the bytes flow directly into the wire-output buffer.
     public static func escape(_ bytes: UnsafeBufferPointer<UInt8>) -> String {
-        // Worst-case expansion: every byte becomes %HH (3 ASCII chars).
-        var out = [UInt8]()
+        var out = Data()
         out.reserveCapacity(bytes.count * 3)
+        escape(bytes, into: &out)
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    /// Byte-output variant of `escape`: append the escaped form of
+    /// `bytes` directly into `out`. The caller's `out` buffer is the
+    /// wire-write target, so no intermediate `Swift.String` ever holds
+    /// the escaped bytes. THIS is the variant secret callers must use.
+    public static func escape(
+        _ bytes: UnsafeBufferPointer<UInt8>,
+        into out: inout Data
+    ) {
         for b in bytes {
             appendEscaped(byte: b, into: &out)
         }
-        // All output is ASCII, so UTF-8 decode is infallible.
-        return String(decoding: out, as: UTF8.self)
     }
 
     /// Decode an Assuan-escaped string into its raw byte sequence.
@@ -98,13 +112,34 @@ public enum LineCodec {
     /// from `escape` in that space (0x20) passes through verbatim — the `+`
     /// substitution is a command-argument convention only, not a data-line
     /// rule (Assuan spec, "Data Lines").
+    ///
+    /// SECURITY: this convenience materialises the escaped form as a
+    /// `Swift.String`. For the common case of an ASCII passphrase
+    /// containing none of `+`, `%`, control bytes, or high bits, the
+    /// escaped form is byte-identical to the plaintext — which means
+    /// the returned `String` IS the secret in unwiped, non-locked
+    /// Swift heap. Use the `into:` variant below for any secret
+    /// payload; the production wire path uses it.
     public static func escapeForDataLine(_ bytes: UnsafeBufferPointer<UInt8>) -> String {
-        var out = [UInt8]()
+        var out = Data()
         out.reserveCapacity(bytes.count * 3)
+        escapeForDataLine(bytes, into: &out)
+        return String(decoding: out, as: UTF8.self)
+    }
+
+    /// Byte-output variant of `escapeForDataLine`: append the escaped
+    /// form of `bytes` directly into `out`. `out` is the caller's
+    /// wire-write buffer, so no intermediate `Swift.String` or
+    /// unrelated allocation holds the escaped bytes. THIS is the
+    /// variant the production `Response.encodeDataLine` uses for
+    /// SecureBytes payloads.
+    public static func escapeForDataLine(
+        _ bytes: UnsafeBufferPointer<UInt8>,
+        into out: inout Data
+    ) {
         for b in bytes {
             appendEscapedForDataLine(byte: b, into: &out)
         }
-        return String(decoding: out, as: UTF8.self)
     }
 
     /// Decode a `D`-line escaped string. Mirrors `escapeForDataLine`: `%HH`
@@ -145,7 +180,7 @@ public enum LineCodec {
     /// with U+FFFD when the result is materialised as a `String`. Escaping
     /// keeps the output pure ASCII and lossless. Decoders (theirs and ours)
     /// accept `%HH` for any byte value, so this stays wire-compatible.
-    private static func appendEscaped(byte b: UInt8, into out: inout [UInt8]) {
+    private static func appendEscaped(byte b: UInt8, into out: inout Data) {
         switch b {
         case 0x20: // space -> '+'
             out.append(0x2B)
@@ -160,7 +195,7 @@ public enum LineCodec {
 
     /// Like `appendEscaped` but does NOT remap space → '+'. Used for `D`-line
     /// payloads where the `+` substitution would corrupt space-bearing data.
-    private static func appendEscapedForDataLine(byte b: UInt8, into out: inout [UInt8]) {
+    private static func appendEscapedForDataLine(byte b: UInt8, into out: inout Data) {
         switch b {
         case 0x2B, 0x25: // '+' or '%' -> %HH
             appendPercentHex(b, into: &out)
@@ -171,7 +206,7 @@ public enum LineCodec {
         }
     }
 
-    private static func appendPercentHex(_ b: UInt8, into out: inout [UInt8]) {
+    private static func appendPercentHex(_ b: UInt8, into out: inout Data) {
         out.append(0x25) // '%'
         out.append(hexDigit(b >> 4))
         out.append(hexDigit(b & 0x0F))
