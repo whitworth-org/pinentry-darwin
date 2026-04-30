@@ -196,7 +196,30 @@ extension Command {
         if fpr.isEmpty {
             throw CommandParseError.unsupportedKeyInfo
         }
+        // The fingerprint flows directly into kSecAttrAccount in the
+        // shared "GnuPG" keychain namespace. Reject anything that isn't a
+        // SHA-1 (40) or SHA-256 (64) hex string so a hostile parent
+        // cannot pollute the namespace with control bytes, slashes, or
+        // megabyte-scale payloads.
+        guard isValidFingerprint(fpr) else {
+            throw CommandParseError.unsupportedKeyInfo
+        }
         return .setKeyInfo(.key(mode: modeChar, fingerprint: fpr))
+    }
+
+    /// Hex-fingerprint validator shared by `parseSetKeyInfo` and the
+    /// CLEARPASSPHRASE handler. Accepts exactly 40 (SHA-1) or 64 (SHA-256)
+    /// case-insensitive ASCII hex characters; rejects everything else
+    /// (length, non-hex bytes, Unicode hex digits from other scripts).
+    public static func isValidFingerprint(_ s: String) -> Bool {
+        let n = s.count
+        guard n == 40 || n == 64 else { return false }
+        return s.unicodeScalars.allSatisfy { c in
+            let v = c.value
+            return (v >= 0x30 && v <= 0x39) ||  // 0-9
+                   (v >= 0x41 && v <= 0x46) ||  // A-F
+                   (v >= 0x61 && v <= 0x66)     // a-f
+        }
     }
 
     private static func parseSetTimeout(_ args: String) throws -> Command {

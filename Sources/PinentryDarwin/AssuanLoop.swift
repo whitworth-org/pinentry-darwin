@@ -415,6 +415,14 @@ final class AssuanLoop {
         }
         let fpr = String(trimmed[trimmed.index(after: slash)...])
         if fpr.isEmpty { return }
+        // Mirror SETKEYINFO's strict validation. CLEARPASSPHRASE is
+        // best-effort, so an invalid fingerprint silently no-ops rather
+        // than aborting the loop — but we still refuse to flow attacker
+        // bytes into kSecAttrAccount.
+        guard Command.isValidFingerprint(fpr) else {
+            log.error("clearpassphrase: invalid fingerprint format; ignoring")
+            return
+        }
         do {
             try keychain.clear(fingerprint: fpr)
         } catch {

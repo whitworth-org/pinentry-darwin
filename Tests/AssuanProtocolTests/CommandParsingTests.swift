@@ -53,6 +53,62 @@ final class CommandParsingTests: XCTestCase {
         XCTAssertEqual(parsed, .setKeyInfo(.key(mode: "u", fingerprint: fpr)))
     }
 
+    func testSetKeyInfoSha256() throws {
+        // SHA-256 fingerprint (64 hex chars) — must be accepted.
+        let fpr = String(repeating: "A", count: 64)
+        let parsed = try Command.parse("SETKEYINFO s/\(fpr)")
+        XCTAssertEqual(parsed, .setKeyInfo(.key(mode: "s", fingerprint: fpr)))
+    }
+
+    func testSetKeyInfoLowercaseHex() throws {
+        // Mixed-case hex must round-trip verbatim.
+        let fpr = "abcdef0123456789abcdef0123456789ABCDEF01"
+        let parsed = try Command.parse("SETKEYINFO n/\(fpr)")
+        XCTAssertEqual(parsed, .setKeyInfo(.key(mode: "n", fingerprint: fpr)))
+    }
+
+    func testSetKeyInfoRejectsShort() {
+        // 39 hex chars — wrong length.
+        let fpr = String(repeating: "A", count: 39)
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO u/\(fpr)"))
+    }
+
+    func testSetKeyInfoRejectsLong() {
+        // 41 hex chars — wrong length.
+        let fpr = String(repeating: "A", count: 41)
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO u/\(fpr)"))
+    }
+
+    func testSetKeyInfoRejectsHuge() {
+        // ~10 KiB of hex — would have polluted kSecAttrAccount.
+        let fpr = String(repeating: "A", count: 10_000)
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO u/\(fpr)"))
+    }
+
+    func testSetKeyInfoRejectsNonHex() {
+        // 40 chars but contains 'G' — not valid hex.
+        let fpr = "GGGGAAAA1111BBBB2222CCCC3333DDDD4444EEEE"
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO u/\(fpr)"))
+    }
+
+    func testSetKeyInfoRejectsControlBytes() {
+        // 40 "chars" including embedded NUL — would have flowed into the
+        // keychain account namespace.
+        let fpr = "AAAA1111BBBB2222CCCC3333DDDD4444EEEE\u{0000}55"
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO u/\(fpr)"))
+    }
+
+    func testIsValidFingerprintShape() {
+        XCTAssertTrue(Command.isValidFingerprint(String(repeating: "0", count: 40)))
+        XCTAssertTrue(Command.isValidFingerprint(String(repeating: "f", count: 64)))
+        XCTAssertFalse(Command.isValidFingerprint(""))
+        XCTAssertFalse(Command.isValidFingerprint(String(repeating: "A", count: 50)))
+        XCTAssertFalse(Command.isValidFingerprint("/"))
+        // Arabic-Indic digit ٠ is "hex" under Character.isHexDigit but
+        // must NOT pass our ASCII-only validator.
+        XCTAssertFalse(Command.isValidFingerprint(String(repeating: "\u{0660}", count: 40)))
+    }
+
     func testConfirmFlagless() throws {
         XCTAssertEqual(try Command.parse("CONFIRM"),
                        .confirm(oneButton: false))
