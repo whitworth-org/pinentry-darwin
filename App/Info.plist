@@ -6,6 +6,8 @@
     <string>org.whitworth.pinentry-darwin</string>
     <key>CFBundleExecutable</key>
     <string>pinentry-darwin</string>
+    <key>CFBundleIconFile</key>
+    <string>Icon</string>
     <key>CFBundleName</key>
     <string>pinentry-darwin</string>
     <key>CFBundlePackageType</key>

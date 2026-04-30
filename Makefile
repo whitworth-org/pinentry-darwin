@@ -35,7 +35,11 @@ BUILD_DIR       := build
 APP_BUNDLE      := $(BUILD_DIR)/$(APP_NAME).app
 APP_CONTENTS    := $(APP_BUNDLE)/Contents
 APP_MACOS       := $(APP_CONTENTS)/MacOS
+APP_RESOURCES   := $(APP_CONTENTS)/Resources
 RELEASE_BIN     := .build/release/$(APP_NAME)
+
+ICON_SRC        := App/Icon.icns
+ICON_DEST       := $(APP_RESOURCES)/Icon.icns
 
 # Architecture suffix for release artefacts. Shipping arm64-only for now;
 # add a fat-binary swift build invocation when Intel support lands.
@@ -51,7 +55,7 @@ PKG_SIGNED      := $(BUILD_DIR)/$(APP_NAME)-$(VERSION).pkg
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug test smoke integration-check audit audit-release check-signing sign notarize pkg tarball release clean
+.PHONY: help build debug test smoke integration-check audit audit-release check-signing sign notarize pkg tarball release clean icon
 
 # --- Targets -----------------------------------------------------------------
 
@@ -81,7 +85,7 @@ help:
 debug:
 	swift build
 
-build: $(APP_MACOS)/$(APP_NAME) $(APP_CONTENTS)/Info.plist
+build: $(APP_MACOS)/$(APP_NAME) $(APP_CONTENTS)/Info.plist $(ICON_DEST)
 	@echo "Bundled $(APP_BUNDLE)"
 
 # The bundled binary depends on the swift-built artefact; cp -p preserves
@@ -102,7 +106,10 @@ $(APP_MACOS)/$(APP_NAME): $(RELEASE_BIN) | $(APP_MACOS)
 $(APP_CONTENTS)/Info.plist: $(INFO_PLIST) | $(APP_CONTENTS)
 	cp -p $< $@
 
-$(APP_MACOS) $(APP_CONTENTS):
+$(ICON_DEST): $(ICON_SRC) | $(APP_RESOURCES)
+	cp -p $< $@
+
+$(APP_MACOS) $(APP_CONTENTS) $(APP_RESOURCES):
 	install -d $@
 
 $(RELEASE_BIN): FORCE
@@ -180,3 +187,13 @@ release: pkg tarball
 
 clean:
 	rm -rf .build $(BUILD_DIR)
+
+# Regenerate App/Icon.icns from the Swift+SF Symbol generator. The .icns
+# is committed so normal builds don't depend on swift script execution;
+# only run this target when the icon design changes.
+icon:
+	rm -rf $(BUILD_DIR)/icon.iconset
+	mkdir -p $(BUILD_DIR)
+	swift scripts/make-icon.swift $(BUILD_DIR)/icon.iconset
+	iconutil -c icns -o $(ICON_SRC) $(BUILD_DIR)/icon.iconset
+	@echo "Regenerated $(ICON_SRC)"
