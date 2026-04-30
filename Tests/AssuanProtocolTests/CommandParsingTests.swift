@@ -109,6 +109,54 @@ final class CommandParsingTests: XCTestCase {
         XCTAssertFalse(Command.isValidFingerprint(String(repeating: "\u{0660}", count: 40)))
     }
 
+    // MARK: - parseUserIdFromDescription
+
+    func testParseUserIdNilOnNilInput() {
+        XCTAssertNil(Command.parseUserIdFromDescription(nil))
+    }
+
+    func testParseUserIdNilOnNoQuotes() {
+        XCTAssertNil(Command.parseUserIdFromDescription("no quotes here"))
+    }
+
+    func testParseUserIdNilOnSingleQuote() {
+        XCTAssertNil(Command.parseUserIdFromDescription("only one \" mark"))
+    }
+
+    func testParseUserIdPicksLastPair() {
+        // gpg-agent's stock SETDESC ends with the user-id in quotes.
+        // Any localised header that itself uses quotes ("a quoted prefix")
+        // must not shift the label off-target.
+        let desc = "Please enter the passphrase \"prefix shouldn't win\" for \"Alice <a@b>\""
+        XCTAssertEqual(Command.parseUserIdFromDescription(desc), "Alice <a@b>")
+    }
+
+    func testParseUserIdRejectsEmptyPair() {
+        XCTAssertNil(Command.parseUserIdFromDescription("Header with empty \"\" pair"))
+    }
+
+    func testParseUserIdCapsAt256() {
+        // 300 chars of payload — must come back capped to 256.
+        let payload = String(repeating: "a", count: 300)
+        let result = Command.parseUserIdFromDescription("\"\(payload)\"")
+        XCTAssertEqual(result?.count, 256)
+    }
+
+    func testParseUserIdRejectsControlBytes() {
+        // NEL (\x85) is a Unicode control; embedded LF and BEL are also
+        // common attacker-injected payloads. Any of these must drop the
+        // candidate to nil rather than corrupting kSecAttrLabel.
+        XCTAssertNil(Command.parseUserIdFromDescription("\"Alice\u{0007}Bob\""))
+        XCTAssertNil(Command.parseUserIdFromDescription("\"Alice\nBob\""))
+        XCTAssertNil(Command.parseUserIdFromDescription("\"Alice\u{007F}Bob\""))
+    }
+
+    func testParseUserIdAllowsExtendedAscii() {
+        // Common UTF-8 characters in non-English user-ids must pass.
+        let desc = "for \"Álice <á@b>\""
+        XCTAssertEqual(Command.parseUserIdFromDescription(desc), "Álice <á@b>")
+    }
+
     func testConfirmFlagless() throws {
         XCTAssertEqual(try Command.parse("CONFIRM"),
                        .confirm(oneButton: false))

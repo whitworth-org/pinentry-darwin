@@ -283,7 +283,7 @@ final class AssuanLoop {
                case .key(_, let fpr)? = dialog.keyInfo,
                prefs.keychainEnabled
             {
-                let label = parseUserId(from: dialog.description)
+                let label = Command.parseUserIdFromDescription(dialog.description)
                 do {
                     try keychain.store(fingerprint: fpr,
                                        label: label,
@@ -526,24 +526,8 @@ final class AssuanLoop {
     }
 }
 
-// MARK: - parseUserId
-
-/// Extract the first quoted substring from a SETDESC line.
-///
-/// gpg-agent's stock SETDESC reads roughly:
-///   `Please enter the passphrase to unlock the OpenPGP secret key:%0A"Alice <a@b>"%0A...`
-///
-/// We pick the first `"..."` pair, percent-decoded already by the parser, and
-/// return its contents. Returns nil if no balanced pair is found — the
-/// keychain layer then falls back to using the service name as a label.
-func parseUserId(from description: String?) -> String? {
-    guard let description else { return nil }
-    guard let first = description.firstIndex(of: "\"") else { return nil }
-    let afterFirst = description.index(after: first)
-    guard afterFirst < description.endIndex else { return nil }
-    guard let second = description[afterFirst...].firstIndex(of: "\"") else {
-        return nil
-    }
-    let label = String(description[afterFirst..<second])
-    return label.isEmpty ? nil : label
-}
+// User-id extraction lives in `Command.parseUserIdFromDescription`
+// (Sources/AssuanProtocol/Command.swift) so it is testable from the
+// AssuanProtocol test target. The bounded, last-quoted-pair version
+// also rejects control bytes that would otherwise corrupt
+// kSecAttrLabel and Keychain Access display.
