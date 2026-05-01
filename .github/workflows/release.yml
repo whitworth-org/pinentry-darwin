@@ -43,16 +43,29 @@ jobs:
       BUNDLE_ID: org.whitworth.pinentry-darwin
     steps:
       - name: Harden runner
-        # TODO: switch to 'block' after observing the first successful run.
-        # Once observed, restore explicit allowed-endpoints covering:
-        #   github.com:443, api.github.com:443, objects.githubusercontent.com:443,
-        #   uploads.github.com:443, *.actions.githubusercontent.com:443,
-        #   notarize.apple.com:443, notary-submissions.apple.com:443,
-        #   appstoreconnect.apple.com:443, developer.apple.com:443,
-        #   *.apple.com:443, swift.org:443, download.swift.org:443
+        # Allowlist scope: GitHub (checkout, action downloads, asset uploads,
+        # actions runtime), Apple (notarytool submission, codesign timestamp
+        # + OCSP/CRL during sign), StepSecurity telemetry. Wildcards:
+        # *.apple.com covers notarize/notary-submissions/appstoreconnect/
+        # developer/timestamp/ocsp/crl; *.blob.core.windows.net covers
+        # GitHub's randomly-assigned action result storage; *.actions
+        # .githubusercontent.com covers results-receiver and any other
+        # actions-runtime endpoints.
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.actions.githubusercontent.com:443
+            *.apple.com:443
+            *.blob.core.windows.net:443
+            agent.api.stepsecurity.io:443
+            api.github.com:443
+            codeload.github.com:443
+            github.com:443
+            objects.githubusercontent.com:443
+            prod.app-api.stepsecurity.io:443
+            raw.githubusercontent.com:443
+            uploads.github.com:443
 
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
