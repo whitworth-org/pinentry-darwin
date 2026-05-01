@@ -1,74 +1,67 @@
 # pinentry-darwin
 
-A modern Swift 6 / SwiftUI replacement for pinentry-mac. Drop-in Assuan-protocol passphrase dialog for `gpg-agent` on macOS, designed to look and feel like Ghostty.
+A SwiftUI passphrase dialog for `gpg-agent` on macOS. Drop-in replacement for `pinentry-mac`: same Assuan protocol, compatible Keychain entries.
 
-## Status
-
-Alpha / pre-1.0. APIs and packaging may change. Not yet recommended for production use.
-
-## Requirements
-
-- macOS 15.0 (Sequoia) or later
-- Swift 6 toolchain (Xcode 16+) for development
+Requires macOS 15 (Sequoia) or later, Apple Silicon.
 
 ## Install
 
-Pre-built binaries (coming soon):
+Download `pinentry-darwin-<version>.pkg` from the [latest release](../../releases/latest) and install:
 
 ```sh
-brew install whitworth/tap/pinentry-darwin
+sudo installer -pkg pinentry-darwin-*.pkg -target /
 ```
 
-Manual install: download the notarized `.pkg` from the GitHub releases page and run it. The package installs `pinentry-darwin.app` into `/Applications`.
-
-Build from source:
-
-```sh
-make build
-```
-
-## Configure gpg-agent
-
-Add the following line to `~/.gnupg/gpg-agent.conf`, substituting the actual path to the installed binary (the Homebrew formula symlinks it into `/opt/homebrew/bin`):
+Point `gpg-agent` at the installed binary by adding one line to `~/.gnupg/gpg-agent.conf`:
 
 ```
-pinentry-program /opt/homebrew/bin/pinentry-darwin
+pinentry-program /Applications/pinentry-darwin.app/Contents/MacOS/pinentry-darwin
 ```
 
-Then reload the agent so the change takes effect:
+Reload the agent:
 
 ```sh
 gpgconf --kill gpg-agent
 ```
 
-## Settings
+The next GPG operation that needs a passphrase will use pinentry-darwin.
 
-Open the settings window from a terminal:
-
-```sh
-pinentry-darwin --preferences
-```
-
-The signed `.pkg` also installs `Pinentry Darwin Settings.app`, which can be opened from Spotlight or the `/Applications` folder. Settings cover appearance (System / Light / Dark), Keychain behavior, and dialog defaults.
-
-## Building from source
+## Verify
 
 ```sh
-make build           # release build, bundled into build/pinentry-darwin.app
-make test            # run the unit tests
-make smoke           # build + feed an Assuan transcript to the binary
-make check-signing   # verify the Developer ID identity is available
-make release         # full pipeline: sign, notarize, pkg, tarball
+spctl -a -vv -t exec /Applications/pinentry-darwin.app
+codesign -dvv /Applications/pinentry-darwin.app 2>&1 | grep -E 'TeamIdentifier|Notarization'
 ```
 
-The `Makefile` is the source of truth for the release pipeline. See its `help` target for the full list.
+Expected: `accepted, source=Notarized Developer ID`, `TeamIdentifier=KHJA84J3YW`, and `Notarization Ticket=stapled`.
+
+## Compatibility
+
+- Reads Keychain entries written by `pinentry-mac` (`service=GnuPG`, `account=<fingerprint>`) without migration.
+- Honours the `org.gpgtools.common` user defaults (`UseKeychain`, `DisableKeychain`, `ShowPassphrase`) as fallback when its own preferences are unset.
+- Implements the Assuan commands required by `gpg-agent` 2.4+: `GETPIN`, `CONFIRM`, `MESSAGE`, `SETREPEAT`, `SETKEYINFO`, `SETQUALITYBAR`, `SETTIMEOUT`, `OPTION`, `GETINFO`, `CLEARPASSPHRASE`, `RESET`, `BYE`.
+- Not yet implemented: passphrase generation (`SETGENPIN`), curses TTY fallback, non-English localisation.
+
+## Build from source
+
+```sh
+make build         # bundles build/pinentry-darwin.app
+make test          # full test suite
+make release SIGNER_NAME="<name>" VERSION=<version>
+                   # codesign → notarize → pkg → tarball
+```
+
+Requires a Swift 6.3 toolchain. The release pipeline additionally requires an Apple Developer ID and a `notarytool` keychain profile (`xcrun notarytool store-credentials`).
+
+## Security
+
+- Hardened runtime; `com.apple.security.get-task-allow=false` blocks debugger attach via `task_for_pid`.
+- Passphrases never touch `Swift.String`. They live in `mlock`'d, deinit-zeroed buffers and travel from secure memory directly onto the Assuan `D` line — no logging path can reach them.
+- No third-party SwiftPM dependencies — standard library and Apple frameworks only.
+- App Sandbox is intentionally disabled (it would block `gpg-agent`'s stdio pipe inheritance). Hardened Runtime alone provides the relevant exploit mitigations.
 
 ## License
 
-MIT. See `LICENSE`.
+[MIT](LICENSE). Copyright © 2026 Ryan Whitworth.
 
-This project re-implements the Assuan protocol from scratch; it does not include any GPL-licensed code from the upstream `pinentry` package. UI styling is inspired by Ghostty (MIT). Files derived from Ghostty carry an explicit attribution header naming their source.
-
-## Contributing
-
-Open an issue or pull request on GitHub. There is no DCO or CLA. Please do not add SwiftPM dependencies — this project deliberately ships with zero third-party code on the supply chain.
+Window-styling patterns adapted from [Ghostty](https://github.com/ghostty-org/ghostty) (MIT). Assuan protocol semantics conform to the upstream [GnuPG pinentry](https://gnupg.org/related_software/pinentry/) specification — re-implemented from the spec; not derived from GPL sources.
