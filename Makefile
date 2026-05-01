@@ -144,8 +144,12 @@ check-signing:
 	@echo "Found codesigning identity for Team $(TEAM_ID)."
 
 sign: build check-signing
+	@# AMFI's XML parser rejects long XML comments in entitlements files
+	@# ("AMFIUnserializeXML: syntax error"). plutil -convert xml1 emits a
+	@# normalised, comment-free plist that codesign accepts.
+	plutil -convert xml1 -o $(BUILD_DIR)/entitlements.plist $(ENTITLEMENTS)
 	codesign --force --options runtime --timestamp \
-		--entitlements $(ENTITLEMENTS) \
+		--entitlements $(BUILD_DIR)/entitlements.plist \
 		--sign $(TEAM_ID) \
 		$(APP_BUNDLE)
 	@echo "Signed $(APP_BUNDLE)"
@@ -174,7 +178,14 @@ pkg: notarize
 	productsign --sign "Developer ID Installer: $(SIGNER_NAME) ($(TEAM_ID))" \
 		$(PKG_UNSIGNED) \
 		$(PKG_SIGNED)
-	@echo "Built $(PKG_SIGNED)"
+	@# Gatekeeper rejects signed-but-unnotarized installer packages on
+	@# user systems with "Unnotarized Developer ID". Notarize the pkg
+	@# itself (separate submission from the .app) and staple the ticket.
+	xcrun notarytool submit $(PKG_SIGNED) \
+		--keychain-profile $(NOTARY_PROFILE) \
+		--wait
+	xcrun stapler staple $(PKG_SIGNED)
+	@echo "Built, notarized, and stapled $(PKG_SIGNED)"
 
 tarball: notarize
 	tar -czf $(TARBALL_PATH) -C $(BUILD_DIR) $(APP_NAME).app
