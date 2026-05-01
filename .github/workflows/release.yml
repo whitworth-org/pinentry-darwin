@@ -1,0 +1,218 @@
+# SPDX-License-Identifier: MIT
+# Release: tag-driven signed + notarized build of pinentry-darwin.
+#
+# Security model:
+#   - Triggered exclusively by signed annotated tags matching v*.*.* — no
+#     workflow_dispatch, no branch trigger, no fork can run it.
+#   - Workflow-level permissions are read-only; only the release job opts into
+#     contents: write to publish a draft GitHub Release.
+#   - Runs in the `production` environment, which gates required reviewers and
+#     scopes the signing/notarization secrets to this workflow.
+#   - Each step receives only the secrets it needs via step-level env: blocks.
+#     No `${{ secrets.X }}` interpolation appears inside any run: script.
+#   - Cert decoding uses `printenv` (not `echo`) so the base64 blob never
+#     appears on a process command line.
+#   - An ephemeral keychain is created in $RUNNER_TEMP, used for the run, and
+#     deleted in the always-cleanup step; .p12s and the notary .p8 are
+#     securely removed with `rm -P`.
+#   - The release job verifies the tag's GPG signature against the maintainer's
+#     public key before any signing or notarization runs.
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: build-sign-notarize-publish
+    runs-on: macos-15
+    timeout-minutes: 60
+    environment: production
+    permissions:
+      contents: write
+    env:
+      TEAM_ID: KHJA84J3YW
+      BUNDLE_ID: org.whitworth.pinentry-darwin
+    steps:
+      - name: Harden runner
+        # TODO: switch to 'block' after observing the first successful run.
+        # Once observed, restore explicit allowed-endpoints covering:
+        #   github.com:443, api.github.com:443, objects.githubusercontent.com:443,
+        #   uploads.github.com:443, *.actions.githubusercontent.com:443,
+        #   notarize.apple.com:443, notary-submissions.apple.com:443,
+        #   appstoreconnect.apple.com:443, developer.apple.com:443,
+        #   *.apple.com:443, swift.org:443, download.swift.org:443
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Import maintainer public key (for tag verification)
+        run: |
+          set -euo pipefail
+          # Public key is committed at .github/maintainer-pubkey.asc — not a
+          # secret, but keeping it in-tree means tag verification has no
+          # external network dependency and an attacker swapping the key is
+          # caught by the commit-signing requirement on main.
+          gpg --batch --import .github/maintainer-pubkey.asc
+          # Mark the maintainer key ultimately trusted for this ephemeral
+          # runner only, so `git tag -v` reports "Good signature" rather
+          # than "untrusted". Full fingerprint, not short ID.
+          gpg --batch --import-ownertrust <<'EOF'
+          1EA93FE7B6638F3C6B6E9C5C2ABD2764D9D7175C:6:
+          EOF
+
+      - name: Verify tag signature
+        run: |
+          set -euo pipefail
+          if ! git tag -v "$GITHUB_REF_NAME" 2>&1 | grep -q "Good signature"; then
+            echo "::error::Tag $GITHUB_REF_NAME is not signed by a trusted key" >&2
+            git tag -v "$GITHUB_REF_NAME" 2>&1 | sed 's/^/  /'
+            exit 1
+          fi
+
+      - name: Verify Info.plist version matches tag
+        run: |
+          set -euo pipefail
+          PLIST_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/Info.plist)
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PLIST_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Info.plist CFBundleShortVersionString=$PLIST_VERSION does not match tag $TAG_VERSION" >&2
+            exit 1
+          fi
+          echo "VERSION=$TAG_VERSION" >> "$GITHUB_ENV"
+
+      - name: Provision ephemeral keychain and import signing certificates
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.BUILD_CERTIFICATE_BASE64 }}
+          BUILD_CERTIFICATE_PASSWORD: ${{ secrets.BUILD_CERTIFICATE_PASSWORD }}
+          INSTALLER_CERTIFICATE_BASE64: ${{ secrets.INSTALLER_CERTIFICATE_BASE64 }}
+          INSTALLER_CERTIFICATE_PASSWORD: ${{ secrets.INSTALLER_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PATH="$RUNNER_TEMP/runner.keychain-db"
+          BUILD_CERT_PATH="$RUNNER_TEMP/build_cert.p12"
+          INSTALLER_CERT_PATH="$RUNNER_TEMP/installer_cert.p12"
+
+          # Decode certs from base64. Use printenv (no echoing on cmdline).
+          printenv BUILD_CERTIFICATE_BASE64 | base64 -d > "$BUILD_CERT_PATH"
+          printenv INSTALLER_CERTIFICATE_BASE64 | base64 -d > "$INSTALLER_CERT_PATH"
+
+          # Create + unlock + add-to-search-list
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Prepend (not replace) to user search list
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"' | xargs)
+          security default-keychain -s "$KEYCHAIN_PATH"
+
+          # Import — note -T whitelists tools allowed to use the key without prompt
+          security import "$BUILD_CERT_PATH" -k "$KEYCHAIN_PATH" -P "$BUILD_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security import "$INSTALLER_CERT_PATH" -k "$KEYCHAIN_PATH" -P "$INSTALLER_CERTIFICATE_PASSWORD" -T /usr/bin/productsign -T /usr/bin/security
+
+          # macOS 10.12+ ACL — allow non-interactive signing
+          security set-key-partition-list -S apple-tool:,apple:,codesign:,productsign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # Securely delete decoded p12s
+          rm -P "$BUILD_CERT_PATH" "$INSTALLER_CERT_PATH"
+
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      - name: Provision notarytool credentials
+        env:
+          NOTARY_API_KEY_BASE64: ${{ secrets.NOTARY_API_KEY_BASE64 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          AUTH_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          printenv NOTARY_API_KEY_BASE64 | base64 -d > "$AUTH_KEY_PATH"
+          xcrun notarytool store-credentials pinentry-darwin-notary \
+            --key "$AUTH_KEY_PATH" \
+            --key-id "$NOTARY_API_KEY_ID" \
+            --issuer "$NOTARY_API_ISSUER_ID" \
+            --keychain "$KEYCHAIN_PATH"
+          echo "AUTH_KEY_PATH=$AUTH_KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Verify signing identity is visible
+        run: |
+          set -euo pipefail
+          security find-identity -v -p codesigning | grep -F "(${TEAM_ID})" || (echo "::error::Signing identity for team ${TEAM_ID} not found"; exit 1)
+
+      - name: Build, sign, notarize, package, tarball
+        env:
+          INSTALLER_SIGNER_NAME: ${{ secrets.INSTALLER_SIGNER_NAME }}
+        run: |
+          set -euo pipefail
+          make release SIGNER_NAME="$INSTALLER_SIGNER_NAME" VERSION="$VERSION" NOTARY_PROFILE=pinentry-darwin-notary
+
+      - name: Verify notarized artifacts
+        run: |
+          set -euo pipefail
+          PKG="build/pinentry-darwin-${VERSION}.pkg"
+          TGZ="build/pinentry-darwin-${VERSION}-arm64.tar.gz"
+          [ -f "$PKG" ] || { echo "::error::Missing $PKG"; exit 1; }
+          [ -f "$TGZ" ] || { echo "::error::Missing $TGZ"; exit 1; }
+          spctl -a -vv -t exec build/pinentry-darwin.app
+          spctl -a -vv -t install "$PKG"
+          xcrun stapler validate build/pinentry-darwin.app
+          xcrun stapler validate "$PKG"
+          codesign -dvv build/pinentry-darwin.app 2>&1 | grep -F "TeamIdentifier=${TEAM_ID}"
+          codesign -dvv build/pinentry-darwin.app 2>&1 | grep -F 'flags=0x10000(runtime)'
+
+      - name: Compute SHA-256 sums and write step summary
+        run: |
+          set -euo pipefail
+          PKG="build/pinentry-darwin-${VERSION}.pkg"
+          TGZ="build/pinentry-darwin-${VERSION}-arm64.tar.gz"
+          {
+            echo "## pinentry-darwin ${VERSION}"
+            echo
+            echo "| Artifact | SHA-256 |"
+            echo "|---|---|"
+            echo "| \`$(basename $PKG)\` | \`$(shasum -a 256 $PKG | awk '{print $1}')\` |"
+            echo "| \`$(basename $TGZ)\` | \`$(shasum -a 256 $TGZ | awk '{print $1}')\` |"
+          } | tee "$GITHUB_STEP_SUMMARY" sha256sums.txt > /dev/null
+
+      - name: Publish draft GitHub Release
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          draft: true
+          generate_release_notes: true
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: |
+            build/pinentry-darwin-${{ env.VERSION }}.pkg
+            build/pinentry-darwin-${{ env.VERSION }}-arm64.tar.gz
+            sha256sums.txt
+          fail_on_unmatched_files: true
+
+      - name: Cleanup ephemeral keychain and notary key
+        if: always()
+        env:
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -uo pipefail
+          if [ -n "${AUTH_KEY_PATH:-}" ] && [ -f "$AUTH_KEY_PATH" ]; then
+            rm -P "$AUTH_KEY_PATH" || true
+          fi
+          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi

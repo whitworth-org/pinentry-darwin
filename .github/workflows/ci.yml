@@ -1,0 +1,99 @@
+# SPDX-License-Identifier: MIT
+# CI: build, test, audit, and smoke-test pinentry-darwin on every PR / push to main.
+#
+# Security model:
+#   - No secrets are referenced anywhere in this workflow; PR runs from forks
+#     would have read-only secrets anyway, but we make the absence explicit.
+#   - Workflow-level permissions are read-only; no job elevates.
+#   - Runner is hardened via step-security/harden-runner (audit mode for now).
+#   - Checkout uses persist-credentials: false so the GITHUB_TOKEN is not left
+#     on disk for subsequent steps.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build-test-audit
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Verify Swift toolchain >= 6.0
+        run: |
+          set -euo pipefail
+          SWIFT_LINE=$(swift --version | head -1)
+          echo "Detected: $SWIFT_LINE"
+          # Extract first dotted version number from the banner.
+          SWIFT_VER=$(printf '%s\n' "$SWIFT_LINE" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+          if [ -z "$SWIFT_VER" ]; then
+            echo "::error::Could not parse Swift version from: $SWIFT_LINE" >&2
+            exit 1
+          fi
+          MAJOR=${SWIFT_VER%%.*}
+          if [ "$MAJOR" -lt 6 ]; then
+            echo "::error::Swift $SWIFT_VER is too old; need >= 6.0" >&2
+            exit 1
+          fi
+
+      - name: Cache .build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: .build
+          key: ${{ runner.os }}-swiftbuild-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**') }}
+          restore-keys: |
+            ${{ runner.os }}-swiftbuild-${{ hashFiles('Package.swift') }}
+            ${{ runner.os }}-swiftbuild-
+
+      - name: Swift test
+        run: |
+          set -euo pipefail
+          swift test --parallel
+
+      - name: Swift build (release)
+        run: |
+          set -euo pipefail
+          swift build -c release
+
+      - name: Make build (bundle .app)
+        run: |
+          set -euo pipefail
+          make build
+
+      - name: Make audit (static bundle checks)
+        # The audit-bundle.sh script accepts an ad-hoc-signed binary in CI;
+        # full Developer ID signing only runs in release.yml.
+        run: |
+          set -euo pipefail
+          make audit
+
+      - name: Make smoke (Assuan transcript)
+        run: |
+          set -euo pipefail
+          make smoke
