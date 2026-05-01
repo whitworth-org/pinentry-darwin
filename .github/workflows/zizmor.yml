@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: MIT
+# zizmor: lint GitHub Actions workflows for security smells.
+#
+# Security model:
+#   - Workflow-level permissions deny everything by default; the lint job
+#     opts in only to contents: read.
+#   - Runner is hardened via step-security/harden-runner (audit mode on
+#     ubuntu-latest; egress profile differs from the macOS jobs).
+#   - Checkout uses persist-credentials: false; zizmor never needs the token.
+#   - All actions are SHA-pinned with trailing # vX.Y.Z comments.
+#
+# Reporting:
+#   - advanced-security: false because this is a private repo on Free, where
+#     code-scanning SARIF upload requires GHAS. Findings surface as PR
+#     annotations instead.
+#   - continue-on-error: true on the zizmor step so its findings against the
+#     existing workflows do not block this introductory PR. PR #2 (workflow
+#     permissions tightening) addresses the most common findings; once that
+#     lands, drop continue-on-error so zizmor becomes a hard gate.
+name: zizmor
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: zizmor-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: zizmor-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@b1d7e1fb5de872772f31590499237e7cce841e8e # v0.5.3
+        continue-on-error: true
+        with:
+          advanced-security: false
+          annotations: true
