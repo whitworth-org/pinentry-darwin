@@ -11,6 +11,15 @@ updates:
       day: monday
       time: "08:00"
       timezone: America/Los_Angeles
+    # Cooldown defends against supply-chain attacks that surface as fast-
+    # follow CVEs: an attacker pushes a malicious release, and even if the
+    # upstream maintainer reverts within hours, Dependabot can race to bump
+    # before the revert lands. The cooldown forces a wait window before
+    # any new version is proposed here. (For the github-actions ecosystem,
+    # Dependabot only accepts default-days — semver-tiered cooldowns are
+    # not supported because Actions tags are not strictly semver.)
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
