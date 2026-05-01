@@ -191,17 +191,20 @@ jobs:
           } | tee "$GITHUB_STEP_SUMMARY" sha256sums.txt > /dev/null
 
       - name: Publish draft GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
-        with:
-          draft: true
-          generate_release_notes: true
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          files: |
-            build/pinentry-darwin-${{ env.VERSION }}.pkg
-            build/pinentry-darwin-${{ env.VERSION }}-arm64.tar.gz
+        # Native `gh release create` is preinstalled on the runner and
+        # eliminates one third-party-action supply-chain dependency. fails
+        # naturally if any of the listed asset files do not exist.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME" \
+            "build/pinentry-darwin-${VERSION}.pkg" \
+            "build/pinentry-darwin-${VERSION}-arm64.tar.gz" \
             sha256sums.txt
-          fail_on_unmatched_files: true
 
       - name: Cleanup ephemeral keychain and notary key
         if: always()

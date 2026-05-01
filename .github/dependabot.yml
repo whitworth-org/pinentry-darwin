@@ -11,6 +11,16 @@ updates:
       day: monday
       time: "08:00"
       timezone: America/Los_Angeles
+    # Cooldown defends against supply-chain attacks that surface as fast-
+    # follow CVEs: an attacker pushes a malicious release, and even if the
+    # upstream maintainer reverts within hours, Dependabot can race to bump
+    # before the revert lands. The cooldown forces a wait window before
+    # any new version is proposed here.
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 3
     open-pull-requests-limit: 5
     commit-message:
       prefix: "ci"
