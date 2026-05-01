@@ -4,8 +4,8 @@
 # Security model:
 #   - Triggered exclusively by signed annotated tags matching v*.*.* — no
 #     workflow_dispatch, no branch trigger, no fork can run it.
-#   - Workflow-level permissions are read-only; only the release job opts into
-#     contents: write to publish a draft GitHub Release.
+#   - Workflow-level permissions deny everything by default; only the release
+#     job opts in to contents:write to publish a draft GitHub Release.
 #   - Runs in the `production` environment, which gates required reviewers and
 #     scopes the signing/notarization secrets to this workflow.
 #   - Each step receives only the secrets it needs via step-level env: blocks.
@@ -24,8 +24,7 @@ on:
     tags:
       - 'v*.*.*'
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: release-${{ github.ref }}
