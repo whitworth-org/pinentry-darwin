@@ -18,7 +18,25 @@ import Foundation
 
 public enum Mnemonic {
 
-    /// Strip GTK underscore accelerator markers from `s`.
+    /// Unicode codepoints whose visual effect can re-order or hide
+    /// adjacent text — they have no place in a button label or prompt
+    /// and any presence is treated as attacker-supplied (FV-6).
+    /// Categories:
+    ///   U+200B-U+200F  zero-width / formatting / LRM/RLM
+    ///   U+202A-U+202E  legacy bidi overrides (LRE/RLE/PDF/LRO/RLO)
+    ///   U+2060-U+2069  word-joiner + bidi isolates
+    ///   U+FEFF         BOM / zero-width no-break space
+    @inline(__always)
+    private static func isBidiOrInvisible(_ scalar: Unicode.Scalar) -> Bool {
+        let v = scalar.value
+        return (0x200B...0x200F).contains(v)
+            || (0x202A...0x202E).contains(v)
+            || (0x2060...0x2069).contains(v)
+            || v == 0xFEFF
+    }
+
+    /// Strip GTK underscore accelerator markers from `s` and reject
+    /// embedded bidi-override / invisible codepoints (FV-6).
     public static func strip(_ s: String) -> String {
         var result = ""
         result.reserveCapacity(s.count)
@@ -37,6 +55,15 @@ public enum Mnemonic {
                     continue
                 }
                 break
+            }
+            // FV-6: drop any character whose scalar set includes a
+            // bidi-override / zero-width / BOM codepoint. We drop the
+            // entire grapheme rather than try to surgically excise the
+            // offending scalar — a "u + RLO" cluster is not legible
+            // either way, and the safe action is to omit it.
+            if c.unicodeScalars.contains(where: Self.isBidiOrInvisible) {
+                i = s.index(after: i)
+                continue
             }
             result.append(c)
             i = s.index(after: i)

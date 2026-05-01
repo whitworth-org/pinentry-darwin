@@ -41,15 +41,11 @@ RELEASE_BIN     := .build/release/$(APP_NAME)
 ICON_SRC        := App/Icon.icns
 ICON_DEST       := $(APP_RESOURCES)/Icon.icns
 
-# Architecture suffix for release artefacts. Shipping arm64-only for now;
-# add a fat-binary swift build invocation when Intel support lands.
-ARCH            := $(shell uname -m)
-
 ENTITLEMENTS    := App/$(APP_NAME).entitlements
 INFO_PLIST      := App/Info.plist
 
 ZIP_PATH        := $(BUILD_DIR)/$(APP_NAME).zip
-TARBALL_PATH    := $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-$(ARCH).tar.gz
+TARBALL_PATH    := $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-arm64.tar.gz
 PKG_UNSIGNED    := $(BUILD_DIR)/$(APP_NAME)-unsigned.pkg
 PKG_SIGNED      := $(BUILD_DIR)/$(APP_NAME)-$(VERSION).pkg
 
@@ -130,7 +126,7 @@ integration-check: build
 audit: build
 	scripts/audit-bundle.sh $(APP_BUNDLE)
 
-audit-release:
+audit-release: build
 	scripts/audit-bundle.sh --release $(APP_BUNDLE)
 
 check-signing:
@@ -191,7 +187,14 @@ tarball: notarize
 	tar -czf $(TARBALL_PATH) -C $(BUILD_DIR) $(APP_NAME).app
 	@echo "Built $(TARBALL_PATH)"
 
-release: pkg tarball
+# SC-2: release MUST depend on audit-release. The auditor enforces the
+# forbidden-entitlement allow-list, Hardened Runtime, --timestamp, the
+# stapled-ticket check, and the TeamIdentifier match — exactly the
+# regressions a future bad sign step could introduce that notarisation
+# would still accept. `audit-release` runs after the bundle is fully
+# notarised and stapled (via pkg → notarize → sign chain), so it sees
+# the final artefact rather than an in-progress build.
+release: pkg tarball audit-release
 	@echo "Release artifacts:"
 	@echo "  $(PKG_SIGNED)"
 	@echo "  $(TARBALL_PATH)"

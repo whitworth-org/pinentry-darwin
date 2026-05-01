@@ -37,8 +37,8 @@ final class SecureBytesTests: XCTestCase {
 
     func testRoundUpToPageHelper() {
         // Direct test of the helper used by the allocator. Page size is
-        // always a power of two on Darwin (4 KiB on Intel, 16 KiB on Apple
-        // Silicon), so this verifies the masking logic.
+        // always a power of two on supported Darwin hosts, so this verifies
+        // the masking logic.
         let pageSize = Int(getpagesize())
         XCTAssertEqual(roundUpToPage(0, pageSize: pageSize), 0)
         XCTAssertEqual(roundUpToPage(1, pageSize: pageSize), pageSize)

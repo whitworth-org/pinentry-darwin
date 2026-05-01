@@ -126,6 +126,13 @@ final class AssuanLoop {
     /// the cache and fall through to the UI.
     private var triedKeychainThisSession = false
 
+    /// KC-9: per-session counter for CLEARPASSPHRASE. The verb is
+    /// unauthenticated and a hostile peer could otherwise spam it as
+    /// a denial-of-cache loop, forcing repeated UI prompts. The cap is
+    /// generous (well above any legitimate workflow needs) but bounded.
+    private var clearPassphraseCount = 0
+    private static let maxClearPassphrasePerSession = 64
+
     // MARK: Init
 
     init(
@@ -156,8 +163,19 @@ final class AssuanLoop {
             let cmd: Command
             do {
                 cmd = try await session.nextCommand()
+            } catch SessionError.malformedLine {
+                // AS-4: malformed input is per-command per the Assuan spec;
+                // an ERR reply must NOT tear down the session. The body is
+                // intentionally generic (no echo of the offending bytes —
+                // that would re-introduce the M8 hardening regression).
+                _ = try? await sendErr(code: AssuanError.general,
+                                       message: "Malformed command")
+                continue
+            } catch SessionError.unexpectedEOF {
+                // Peer closed gracefully mid-line; treat as BYE.
+                return
             } catch {
-                log.error("nextCommand threw; aborting loop")
+                log.error("nextCommand threw fatally; aborting loop")
                 _ = try? await sendErr(code: AssuanError.general,
                                        message: "internal error")
                 return
@@ -316,7 +334,14 @@ final class AssuanLoop {
                case .key(_, let fpr)? = dialog.keyInfo,
                prefs.keychainEnabled
             {
-                let label = Command.parseUserIdFromDescription(dialog.description)
+                // KC-7: do NOT use the parsed user-id as kSecAttrLabel.
+                // The label is visible in Keychain Access metadata
+                // (clear-text browsable by any same-user process), so
+                // shipping a mailbox-form user-id leaks PII. Use a
+                // generic, fingerprint-anchored label instead. The
+                // user-id can still be derived offline by anyone who
+                // already has the fingerprint.
+                let label = "GnuPG passphrase (\(fpr.prefix(16)))"
                 do {
                     try keychain.store(fingerprint: fpr,
                                        label: label,
@@ -425,14 +450,34 @@ final class AssuanLoop {
         case .flavor:
             await sendInfoLine("darwin")
         case .ttyinfo:
-            let name = optionState.ttyName ?? "-"
-            let type = optionState.ttyType ?? "-"
+            // AS-8: cap each field so the combined `D <n> <t> 0\n` line
+            // stays under LineCodec.maxLineLength even when ttyName /
+            // ttyType were inflated by a hostile OPTION shipment.
+            // Single-field cap of 256 leaves room for separators + flag.
+            let name = Self.cap(optionState.ttyName ?? "-", to: 256)
+            let type = Self.cap(optionState.ttyType ?? "-", to: 256)
             // Last field is `is_emacs` — always 0 for us.
             await sendInfoLine("\(name) \(type) 0")
         case .other:
             await reply(.err(code: AssuanError.general,
                              message: "unknown getinfo"))
         }
+    }
+
+    /// AS-8 helper: byte-bounded prefix. `String.prefix` counts in
+    /// extended-grapheme clusters which can be many bytes apiece; we
+    /// need a byte cap to stay under the wire-line limit.
+    private static func cap(_ s: String, to maxBytes: Int) -> String {
+        if s.utf8.count <= maxBytes { return s }
+        var out = String.UnicodeScalarView()
+        var used = 0
+        for scalar in s.unicodeScalars {
+            let n = String(scalar).utf8.count
+            if used + n > maxBytes { break }
+            out.append(scalar)
+            used += n
+        }
+        return String(out)
     }
 
     /// Encode an ASCII info string into a `D` line + OK. The payload is
@@ -454,7 +499,19 @@ final class AssuanLoop {
 
     /// Parse `<mode>/<fingerprint>` (or `--clear`) and forget the entry.
     /// Errors are swallowed — CLEARPASSPHRASE is best-effort.
+    ///
+    /// KC-9: rate-limited per session. A hostile peer that fires
+    /// CLEARPASSPHRASE in a tight loop would otherwise force repeated
+    /// keychain calls (each potentially prompting the user). Past the
+    /// per-session cap we silently no-op and log once.
     private func handleClearPassphrase(_ keyInfo: String) {
+        clearPassphraseCount += 1
+        if clearPassphraseCount > Self.maxClearPassphrasePerSession {
+            if clearPassphraseCount == Self.maxClearPassphrasePerSession + 1 {
+                log.error("clearpassphrase: rate limit reached for session; ignoring further requests")
+            }
+            return
+        }
         let trimmed = keyInfo.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty || trimmed == "--clear" {
             return
@@ -583,12 +640,20 @@ final class AssuanLoop {
     /// (e.g. errSecMissingEntitlement = -34018 on an ad-hoc dev build,
     /// or errSecAuthFailed = -25293 on a stale ACL) are diagnosable from
     /// `log show` without re-running the failing flow under a debugger.
-    private static func describe(_ error: KeychainStoreError) -> String {
+    static func describe(_ error: KeychainStoreError) -> String {
         switch error {
         case .userCanceled:
             return "userCanceled"
         case .unexpectedStatus(let s):
             return "unexpectedStatus(\(s))"
+        case .degradedNoEntitlement:
+            return "degradedNoEntitlement"
+        case .accessControlFailed(let detail):
+            // Detail comes from CFError describing why
+            // SecAccessControlCreateWithFlags returned nil. Marked
+            // .private at all interpolation sites; here we return the
+            // raw text and rely on each call site's privacy modifier.
+            return "accessControlFailed(\(detail))"
         }
     }
 }

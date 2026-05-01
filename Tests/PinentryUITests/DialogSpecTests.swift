@@ -89,4 +89,13 @@ final class DialogSpecTests: XCTestCase {
         XCTAssertFalse(DialogSpec.canSaveToKeychain(keyInfo: ki, keychainEnabled: false),
                        "user disabled keychain in prefs blocks Save")
     }
+
+    // AS-1 (defence in depth): even if a future caller bypasses
+    // `Command.parseSetKeyInfo` and constructs a DialogSpec.KeyInfo with
+    // an uppercase mode directly, `canSaveToKeychain` must still gate.
+    func testCanSaveToKeychainUserModeBlockedUppercase() {
+        let ki = DialogSpec.KeyInfo.key(mode: "U", fingerprint: String(repeating: "F", count: 40))
+        XCTAssertFalse(DialogSpec.canSaveToKeychain(keyInfo: ki, keychainEnabled: true),
+                       "mode 'U' (uppercase) must also block Save")
+    }
 }

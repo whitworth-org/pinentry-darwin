@@ -2,7 +2,7 @@
 
 A SwiftUI passphrase dialog for `gpg-agent` on macOS. Drop-in replacement for `pinentry-mac`: same Assuan protocol, compatible Keychain entries.
 
-Requires macOS 15 (Sequoia) or later, Apple Silicon.
+Requires macOS 15 (Sequoia) or later on Apple Silicon. This project is arm64-only; universal and legacy x86_64 builds are intentionally out of scope.
 
 ## Install
 
@@ -52,6 +52,8 @@ make release SIGNER_NAME="<name>" VERSION=<version>
 ```
 
 Requires a Swift 6.3 toolchain. The release pipeline additionally requires an Apple Developer ID and a `notarytool` keychain profile (`xcrun notarytool store-credentials`).
+
+Release artifacts are arm64-only.
 
 ## Security
 

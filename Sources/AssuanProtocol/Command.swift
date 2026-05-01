@@ -189,9 +189,23 @@ extension Command {
             throw CommandParseError.unsupportedKeyInfo
         }
         let modeStr = trimmed[..<slashIdx]
-        guard modeStr.count == 1, let modeChar = modeStr.first else {
+        // SECURITY (AS-1): validate strictly as a single ASCII letter and
+        // normalise to lowercase. Swift `Character.count == 1` accepts
+        // multi-scalar grapheme clusters (e.g. `u + U+0301`) and is
+        // case-sensitive, both of which let a hostile gpg-agent bypass the
+        // `mode == "u"` no-cache policy in `Spec.canSaveToKeychain`. By
+        // requiring exactly one ASCII letter and lowercasing it, every
+        // unicode-homoglyph or uppercase form either rejects (non-letter)
+        // or canonicalises to the policy-checked value.
+        guard
+            modeStr.unicodeScalars.count == 1,
+            let scalar = modeStr.unicodeScalars.first,
+            (0x41...0x5A).contains(scalar.value) || (0x61...0x7A).contains(scalar.value)
+        else {
             throw CommandParseError.unsupportedKeyInfo
         }
+        let lowered = scalar.value | 0x20  // ASCII to-lower (safe: range guarded)
+        let modeChar = Character(Unicode.Scalar(lowered)!)
         let fpr = String(trimmed[trimmed.index(after: slashIdx)...])
         if fpr.isEmpty {
             throw CommandParseError.unsupportedKeyInfo

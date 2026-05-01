@@ -136,7 +136,13 @@ public struct DialogSpec: Sendable {
         keychainEnabled: Bool
     ) -> Bool {
         guard case .key(let mode, _)? = keyInfo else { return false }
-        guard mode != "u" else { return false }
+        // SECURITY (AS-1, defence in depth): although `Command.parseSetKeyInfo`
+        // already lowercases the mode after rejecting non-ASCII-letter modes,
+        // we lowercase again here so any future caller that constructs a
+        // DialogSpec.KeyInfo directly cannot accidentally smuggle 'U' /
+        // unicode-homoglyph past this gate.
+        let lowered = String(mode).lowercased()
+        guard lowered != "u" else { return false }
         return keychainEnabled
     }
 }

@@ -5,7 +5,7 @@
 # audit-bundle.sh — static-audit the built pinentry-darwin.app bundle.
 #
 # Verifies, without launching the binary or hitting the network:
-#   - Mach-O present, arm64, executable bit set
+#   - Mach-O present, arm64-only, executable bit set
 #   - Linked dylibs are exclusively /usr/lib/* and /System/Library/Frameworks/*
 #     (catches accidental /opt/homebrew or /usr/local third-party links)
 #   - Bundle structure: Info.plist, MacOS/<bin>, entitlements file
@@ -62,11 +62,8 @@ fail() {
 # --- Mach-O shape ------------------------------------------------------------
 
 if [ -x "$BIN" ]; then
-    arch_line="$(file "$BIN" | head -n1)"
-    case "$arch_line" in
-        *"Mach-O 64-bit executable arm64"*) ;;
-        *) fail "expected arm64 Mach-O, got: $arch_line" ;;
-    esac
+    archs="$(lipo -archs "$BIN")"
+    [ "$archs" = "arm64" ] || fail "expected arm64-only Mach-O, got: $archs"
 
     # All linked libraries must come from system locations; anything in
     # /opt/homebrew, /usr/local, or @rpath would indicate a third-party leak.
@@ -90,17 +87,44 @@ if [ -f "$INFO_PLIST" ]; then
         || fail "CFBundleShortVersionString missing"
 
     ls_ui="$(plutil -extract LSUIElement raw -- "$INFO_PLIST" 2>/dev/null || true)"
+    # FV-8: plutil emits raw bool values lowercase ("true"/"false") on
+    # macOS Sequoia+ but older toolchains emitted "YES"/"NO" / "1"/"0".
+    # The case arm folds every shipping spelling so a future toolchain
+    # change cannot smuggle a bypass.
     case "$ls_ui" in
-        true|1|YES) ;;
+        true|TRUE|True|1|YES|Yes|yes) ;;
         *) fail "LSUIElement must be true (no Dock icon for Assuan agent mode); got '$ls_ui'" ;;
     esac
 
     min_os="$(plutil -extract LSMinimumSystemVersion raw -- "$INFO_PLIST" 2>/dev/null || true)"
     case "$min_os" in
-        15.*|16.*|17.*) ;;
+        15.*|16.*|17.*|18.*|19.*|20.*) ;;  # FV-9: forward-compat through plausible v20
         '') ;;  # optional; LSMinimumSystemVersion is nice-to-have
         *) fail "LSMinimumSystemVersion '$min_os' is below macOS 15 (CLAUDE.md requires 15+)" ;;
     esac
+
+    # SC-10: forbid any Info.plist key whose presence indicates a
+    # privilege expansion that pinentry should never carry. We treat
+    # `plutil -type $key` returning anything other than "absent / not
+    # present" as a hard fail.
+    for forbidden_key in \
+        CFBundleURLTypes \
+        LSEnvironment \
+        NSAppleEventsUsageDescription \
+        NSCameraUsageDescription \
+        NSMicrophoneUsageDescription \
+        NSContactsUsageDescription \
+        NSLocationUsageDescription \
+        NSCalendarsUsageDescription \
+        NSRemindersUsageDescription \
+        NSSystemAdministrationUsageDescription \
+        NSPhotoLibraryUsageDescription \
+        SUFeedURL
+    do
+        if plutil -extract "$forbidden_key" raw -- "$INFO_PLIST" >/dev/null 2>&1; then
+            fail "Info.plist contains forbidden key: $forbidden_key"
+        fi
+    done
 fi
 
 # --- Entitlements ------------------------------------------------------------
@@ -226,6 +250,16 @@ if [ -x "$BIN" ]; then
             fi
             if ! xcrun stapler validate "$APP_BUNDLE" >/dev/null 2>&1; then
                 fail "release mode requires stapled notarization"
+            fi
+            # SC-11: verify the embedded TeamIdentifier matches the
+            # expected value (default KHJA84J3YW; can be overridden via
+            # PINENTRY_DARWIN_TEAM_ID). Catches a re-sign with a
+            # different developer identity that still passes notarization
+            # but ships under a foreign team.
+            expected_team="${PINENTRY_DARWIN_TEAM_ID:-KHJA84J3YW}"
+            if ! echo "$cs_dump" | grep -qF "TeamIdentifier=${expected_team}"; then
+                actual_team="$(echo "$cs_dump" | awk -F= '/^TeamIdentifier=/ {print $2}')"
+                fail "release TeamIdentifier mismatch: expected '${expected_team}', got '${actual_team}'"
             fi
         fi
     fi

@@ -81,6 +81,42 @@ let package = Package(
             dependencies: ["PinentryUI", "SecureMemory"],
             path: "Tests/PinentryUITests"
         ),
+
+        // MARK: - Fuzz harnesses
+        //
+        // Each fuzz target is a SwiftPM executable that exposes a Swift
+        // function `fuzz<Module>Once([UInt8])` plus a `@_cdecl` libFuzzer
+        // entry point in `FuzzTarget.swift`, and a `main.swift` that reads
+        // stdin and runs the function once. `swift run <target>` is the
+        // regression-replay path (feed a saved crash artifact via stdin).
+        // The libFuzzer build path lives in `scripts/run-fuzz.sh`, which
+        // invokes `swiftc` directly with `-sanitize=address`, force-loads
+        // the libFuzzer runtime, and excludes `main.swift` (since libFuzzer
+        // provides its own main via `Fuzz/Driver/driver.c`).
+        .executableTarget(
+            name: "PinentryFuzzLineCodec",
+            dependencies: ["AssuanProtocol", "SecureMemory"],
+            path: "Fuzz/PinentryFuzzLineCodec",
+            exclude: ["corpus", "findings"]
+        ),
+        .executableTarget(
+            name: "PinentryFuzzCommand",
+            dependencies: ["AssuanProtocol"],
+            path: "Fuzz/PinentryFuzzCommand",
+            exclude: ["corpus", "findings"]
+        ),
+        .executableTarget(
+            name: "PinentryFuzzMnemonic",
+            dependencies: ["AssuanProtocol"],
+            path: "Fuzz/PinentryFuzzMnemonic",
+            exclude: ["corpus", "findings"]
+        ),
+        .executableTarget(
+            name: "PinentryFuzzResponse",
+            dependencies: ["AssuanProtocol", "SecureMemory"],
+            path: "Fuzz/PinentryFuzzResponse",
+            exclude: ["corpus", "findings"]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )

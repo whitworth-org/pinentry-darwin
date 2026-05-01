@@ -46,11 +46,39 @@ public struct OptionState: Sendable, Equatable {
 
     public init() {}
 
+    /// AS-9: per-OPTION-value cap. Each option text field is bounded
+    /// to 1024 bytes to prevent a hostile peer from steadily inflating
+    /// session-lifetime memory by re-issuing OPTION with ever-longer
+    /// payloads. Single-line max is already 1000 bytes (LineCodec
+    /// enforces); this is belt-and-braces against any path that
+    /// concatenates or accumulates without re-bounding.
+    private static let maxOptionValueBytes = 1024
+
+    @inline(__always)
+    private static func cap(_ value: String?) -> String? {
+        guard let value else { return nil }
+        if value.utf8.count <= maxOptionValueBytes { return value }
+        // String.prefix counts in characters but we want a byte cap;
+        // walk the UTF-8 view explicitly. Cheap and bounded.
+        var out = String.UnicodeScalarView()
+        var bytesUsed = 0
+        for scalar in value.unicodeScalars {
+            let scalarBytes = String(scalar).utf8.count
+            if bytesUsed + scalarBytes > maxOptionValueBytes { break }
+            out.append(scalar)
+            bytesUsed += scalarBytes
+        }
+        return String(out)
+    }
+
     // MARK: Apply
 
     /// Apply one parsed `OPTION key[=value]` pair. `value` is `nil` for
     /// flag-style options (e.g. `OPTION grab` / `OPTION no-grab`).
     public mutating func apply(key: String, value: String?) {
+        // AS-9: cap any caller-supplied value at the apply boundary.
+        // Flag-style options (value == nil) flow through unchanged.
+        let value = Self.cap(value)
         switch key {
         case "grab":
             grab = true
@@ -152,7 +180,11 @@ public struct OptionState: Sendable, Equatable {
 
         // head is now "PID" or "PID/UID".
         let parts = head.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
-        if let pid = parts.first.flatMap({ Int32($0) }) {
+        // AS-7: reject negative or zero PIDs. POSIX guarantees pid_t > 0
+        // for real processes; 0 is the "current process group" sentinel
+        // and negative values would round-trip as nonsense to any
+        // downstream process-management call.
+        if let pid = parts.first.flatMap({ Int32($0) }), pid > 0 {
             ownerPID = pid_t(pid)
         }
         if parts.count == 2, let uidVal = UInt32(parts[1]) {

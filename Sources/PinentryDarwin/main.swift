@@ -16,6 +16,7 @@
 import AppKit
 import Darwin
 import Foundation
+import os
 
 // MARK: - Signal handlers
 
@@ -72,14 +73,25 @@ private func writeStdout(_ text: String) {
 
 @MainActor
 private func bootstrap() -> Never {
+    let bootLog = Logger(subsystem: "org.whitworth.pinentry-darwin", category: "boot")
+
     // Zero the core-dump rlimit before anything that might allocate a
     // SecureBytes runs. mlock(2) prevents swap but does NOT inhibit core
     // capture, so a crash mid-dialog without this line would dump live
     // passphrase pages (and any String escape residue) to /cores/. Must
     // be the first call so any panic from subsequent setup still hits a
     // {0,0} limit.
+    //
+    // FV-4: log if setrlimit itself fails (typical: sandbox denial, EPERM
+    // from a process that already lowered its hard limit). The setting is
+    // best-effort — we proceed either way — but a silent failure leaves
+    // the operator wondering why /cores/ contains a passphrase after a
+    // crash.
     var noCore = rlimit(rlim_cur: 0, rlim_max: 0)
-    _ = setrlimit(RLIMIT_CORE, &noCore)
+    if setrlimit(RLIMIT_CORE, &noCore) != 0 {
+        let e = errno
+        bootLog.error("setrlimit(RLIMIT_CORE, 0) failed (errno=\(e, privacy: .public)); core dump may capture secrets")
+    }
 
     // Try to raise the memlock soft limit toward 1 MiB so SecureBytes
     // can mlock its mappings. The macOS default for unprivileged
@@ -88,10 +100,26 @@ private func bootstrap() -> Never {
     // anonymous-but-unlocked pages and secrets become swap-eligible.
     // Best-effort: failure is non-fatal (Locking.swift logs once on
     // the first mlock that doesn't take).
+    //
+    // FV-3: use max(current_cur, target) so an inherited limit ABOVE 1
+    // MiB is preserved. The previous formula `min(rlim_max, 1 MiB)` would
+    // LOWER an operator-hardened parent limit, defeating M5 in exactly
+    // the case where the operator did the right thing.
     var memlim = rlimit(rlim_cur: 0, rlim_max: 0)
     if getrlimit(RLIMIT_MEMLOCK, &memlim) == 0 {
-        memlim.rlim_cur = min(memlim.rlim_max, rlim_t(1 << 20))
-        _ = setrlimit(RLIMIT_MEMLOCK, &memlim)
+        let target = rlim_t(1 << 20)
+        let raised = min(memlim.rlim_max, target)
+        let proposed = Swift.max(memlim.rlim_cur, raised)
+        if proposed > memlim.rlim_cur {
+            memlim.rlim_cur = proposed
+            if setrlimit(RLIMIT_MEMLOCK, &memlim) != 0 {
+                let e = errno
+                bootLog.error("setrlimit(RLIMIT_MEMLOCK, \(proposed, privacy: .public)) failed (errno=\(e, privacy: .public)); secrets may page to swap")
+            }
+        }
+    } else {
+        let e = errno
+        bootLog.error("getrlimit(RLIMIT_MEMLOCK) failed (errno=\(e, privacy: .public)); skipping memlock raise")
     }
 
     installSignalHandlers()

@@ -15,6 +15,7 @@
 
 import Observation
 import SwiftUI
+import KeychainStore
 import SecureMemory
 
 public struct PinView: View {
@@ -265,17 +266,35 @@ public struct PinView: View {
     /// Show typing toggle, indented under the input field. Optionally
     /// joined by the Save in Keychain checkbox when the dialog has a
     /// Keychain affordance.
+    ///
+    /// KC-2 / FV-1: when the data-protection keychain has rejected this
+    /// process for missing entitlement (typical for ad-hoc-signed builds:
+    /// `swift run`, locally re-signed, third-party rebuild), the Save
+    /// affordance is disabled and a one-line caption explains why. We
+    /// read `KeychainStore.degradedPostureObserved` rather than reaching
+    /// into a global app-state mediator: the flag is a process-wide
+    /// monotonic Bool that flips at most once per process lifetime.
     @ViewBuilder
     private var optionsRow: some View {
-        HStack(spacing: Theme.blockPadding) {
-            Toggle("Show typing", isOn: $model.showTyping)
-                .toggleStyle(.checkbox)
-                .font(Theme.bodyFont)
-
-            if spec.allowKeychainSave {
-                Toggle("Save in Keychain", isOn: $model.saveToKeychain)
+        let degraded = KeychainStore.degradedPostureObserved
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: Theme.blockPadding) {
+                Toggle("Show typing", isOn: $model.showTyping)
                     .toggleStyle(.checkbox)
                     .font(Theme.bodyFont)
+
+                if spec.allowKeychainSave {
+                    Toggle("Save in Keychain", isOn: $model.saveToKeychain)
+                        .toggleStyle(.checkbox)
+                        .font(Theme.bodyFont)
+                        .disabled(degraded)
+                }
+            }
+            if spec.allowKeychainSave && degraded {
+                Text(verbatim: "Save unavailable — running with degraded keychain posture (ad-hoc signature).")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Theme.errorText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(.leading, Theme.fieldLabelColumnWidth + Theme.smallPadding)

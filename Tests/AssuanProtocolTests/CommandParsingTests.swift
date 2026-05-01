@@ -207,4 +207,34 @@ final class CommandParsingTests: XCTestCase {
         XCTAssertEqual(try Command.parse("CLEARPASSPHRASE --mode=normal"),
                        .clearPassphrase(keyInfo: "--mode=normal"))
     }
+
+    // MARK: - SETKEYINFO mode normalisation (AS-1 regression)
+
+    func testSetKeyInfoUppercaseModeNormalisesToLower() throws {
+        let fpr = String(repeating: "A", count: 40)
+        // Uppercase 'U' must canonicalise to lowercase so the
+        // `Spec.canSaveToKeychain` `mode == "u"` no-cache policy
+        // applies. Pre-AS-1 this was retained verbatim and bypassed
+        // the gate.
+        let parsed = try Command.parse("SETKEYINFO U/\(fpr)")
+        XCTAssertEqual(parsed, .setKeyInfo(.key(mode: "u", fingerprint: fpr)))
+    }
+
+    func testSetKeyInfoRejectsUnicodeHomoglyphMode() {
+        let fpr = String(repeating: "A", count: 40)
+        // U+00FA (ú) is one grapheme cluster — pre-AS-1 it slipped
+        // past the `mode != "u"` Character comparison.
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO \u{00FA}/\(fpr)"))
+        // u + combining acute = one grapheme but two scalars; reject.
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO u\u{0301}/\(fpr)"))
+        // Cyrillic 'u'-shaped homoglyph.
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO \u{0438}/\(fpr)"))
+    }
+
+    func testSetKeyInfoRejectsNonLetterMode() {
+        let fpr = String(repeating: "A", count: 40)
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO 1/\(fpr)"))
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO -/\(fpr)"))
+        XCTAssertThrowsError(try Command.parse("SETKEYINFO  /\(fpr)"))
+    }
 }

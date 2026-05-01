@@ -40,8 +40,8 @@ enum SecureAllocError: Error, CustomStringConvertible {
 }
 
 /// Round `size` up to the nearest multiple of `pageSize`. `pageSize` must be a
-/// power of two (true on every Darwin/macOS host today; `getpagesize()` is
-/// 16384 on Apple Silicon, 4096 on Intel — both powers of two).
+/// power of two (true on every supported Darwin/macOS host today;
+/// `getpagesize()` is 16384 on Apple Silicon).
 @inline(__always)
 func roundUpToPage(_ size: Int, pageSize: Int) -> Int {
     precondition(pageSize > 0 && (pageSize & (pageSize - 1)) == 0,
@@ -91,6 +91,20 @@ func secureMunmap(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
     return munmap(ptr, bytes) == 0
 }
 
+/// SL-4: when `PINENTRY_DARWIN_REQUIRE_MLOCK=1` is set in the environment,
+/// the process aborts on the first mlock failure rather than continuing
+/// with non-locked secret pages. Default off to preserve the M5 best-
+/// effort contract; opt in for hardened deployments where leaving any
+/// secret swap-eligible is unacceptable. Cached at module-init time so
+/// repeated lookups don't pay the syscall cost.
+private let strictMlockMode: Bool = {
+    if let v = getenv("PINENTRY_DARWIN_REQUIRE_MLOCK"),
+       let s = String(validatingUTF8: v) {
+        return s == "1" || s.lowercased() == "true" || s.lowercased() == "yes"
+    }
+    return false
+}()
+
 /// Best-effort `mlock`. Returns `true` if the kernel locked the region into
 /// physical memory (preventing it from being written to swap). `false` means
 /// the lock failed — typically `EPERM` (no privileges) or `ENOMEM`
@@ -99,7 +113,9 @@ func secureMunmap(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
 ///
 /// On the FIRST failure per process, emits a single os_log warning so an
 /// operator can correlate "secrets paged to swap" with the underlying
-/// resource-limit condition. Subsequent failures stay silent.
+/// resource-limit condition. Subsequent failures stay silent unless
+/// `PINENTRY_DARWIN_REQUIRE_MLOCK=1` is set, in which case the process
+/// `abort()`s before any secret bytes can be written to a non-locked page.
 func secureMlock(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
     let ok = mlock(ptr, bytes) == 0
     if !ok {
@@ -113,6 +129,14 @@ func secureMlock(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
             secureLogger.error(
                 "mlock failed (errno=\(lockErr, privacy: .public)); secret pages may be written to swap. Raise RLIMIT_MEMLOCK or run with elevated privileges."
             )
+        }
+        if strictMlockMode {
+            secureLogger.fault(
+                "PINENTRY_DARWIN_REQUIRE_MLOCK=1 set and mlock failed (errno=\(lockErr, privacy: .public)); aborting before secret bytes can land in non-locked memory."
+            )
+            // SIGABRT (consistent crash-reporter signal). RLIMIT_CORE=0
+            // set by main.swift suppresses any core dump.
+            abort()
         }
     }
     return ok

@@ -68,4 +68,31 @@ final class MnemonicTests: XCTestCase {
         XCTAssertEqual(Mnemonic.strip("_Save in password manager"),
                        "Save in password manager")
     }
+
+    // FV-6 regression: bidi-override / zero-width / BOM codepoints
+    // must be dropped from button labels so a hostile gpg-agent cannot
+    // visually swap "OK" and "Cancel" via U+202E + similar tricks.
+    func testStripsRTLOverride() {
+        // SETOK with embedded RLO ("_O\u{202E}K"). The mnemonic strip
+        // removes the leading underscore; FV-6 then drops U+202E so
+        // the visible label is the structural "OK".
+        XCTAssertEqual(Mnemonic.strip("_O\u{202E}K"), "OK")
+    }
+
+    func testStripsLRO() {
+        XCTAssertEqual(Mnemonic.strip("_C\u{202D}ancel"), "Cancel")
+    }
+
+    func testStripsZeroWidthSpace() {
+        XCTAssertEqual(Mnemonic.strip("OK\u{200B}"), "OK")
+        XCTAssertEqual(Mnemonic.strip("_Y\u{200B}es"), "Yes")
+    }
+
+    func testStripsBidiIsolate() {
+        XCTAssertEqual(Mnemonic.strip("_O\u{2068}K\u{2069}"), "OK")
+    }
+
+    func testStripsBOM() {
+        XCTAssertEqual(Mnemonic.strip("\u{FEFF}OK"), "OK")
+    }
 }

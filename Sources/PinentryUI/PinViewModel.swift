@@ -30,6 +30,7 @@
 
 import Foundation
 import Observation
+import KeychainStore
 import SecureMemory
 
 @MainActor
@@ -88,7 +89,14 @@ public final class PinViewModel {
         self.pin = SecureBytes(capacity: 1024)
         self.repeatPin = SecureBytes(capacity: 1024)
         self.showTyping = showTypingByDefault
-        self.saveToKeychain = spec.allowKeychainSave && saveByDefault
+        // KC-2 / FV-1: when the data-protection keychain has rejected this
+        // process for missing entitlement, refuse to default the Save
+        // checkbox to true even if the user's pref says so. The View
+        // additionally `disable()`s the toggle and surfaces a caption.
+        // We compute degraded-posture here at construction time; the flag
+        // is monotonic per process so once flipped it never flips back.
+        let degraded = KeychainStore.degradedPostureObserved
+        self.saveToKeychain = spec.allowKeychainSave && saveByDefault && !degraded
         self.onResult = onResult
         self.repeatRequired = (spec.repeatPrompt != nil)
         // No repeat field present means "match" is implicitly true.

@@ -80,42 +80,97 @@ public actor Session {
 
     // MARK: Send
 
-    /// Write a `Response` to the output file handle. Each wire line includes
-    /// its own LF terminator.
+    /// Write a `Response` to the output file handle. Each wire payload
+    /// includes its own LF terminator. Secret payloads are written
+    /// directly from their SecureBytes-backed scratch buffer via
+    /// `Darwin.write()` (SL-1) so the escaped wire bytes never cross
+    /// into Foundation.Data heap on the way out.
     public func send(_ response: Response) async throws {
-        let lines = response.wireLines()
-        for line in lines {
-            try writeAll(line)
+        let payloads = response.wirePayloads()
+        for payload in payloads {
+            switch payload {
+            case .plain(let data):
+                try writeAll(data)
+            case .secret(let secure):
+                try writeSecure(secure)
+            }
         }
     }
 
     // MARK: Quality inquiry
 
+    /// Maximum source bytes per `INQUIRE QUALITY` candidate (FZ-1
+    /// companion). Wire prefix is "INQUIRE QUALITY " (16 bytes), worst-
+    /// case escape is 3-for-1, plus LF: 16 + 3*N + 1 ≤ 1001 → N ≤ 328.
+    private static let maxQualityCandidateSourceBytes = 328
+
+    /// Maximum number of intervening reply lines we will consume before
+    /// the terminal OK/END/ERR (AS-2). A hostile gpg-agent could otherwise
+    /// stream `D 0\n` forever and freeze the keystroke-driven quality
+    /// path inside a synchronous send-and-wait.
+    private static let maxQualityReplyLines = 32
+
     /// Send `INQUIRE QUALITY <escaped-bytes>` and read back the response.
     /// Returns the integer carried on the resulting `D` line, clamped to
     /// the conventional [-100, 100] range. The `candidate` bytes never
-    /// leave `SecureBytes` except as their escaped wire form — the
-    /// escaping is appended directly into the wire-output `Data`, no
-    /// intermediate `Swift.String` materialises.
+    /// leave `SecureBytes` (SL-1 companion) — the wire payload is built
+    /// inside a SecureBytes-backed scratch buffer and written directly
+    /// to the file descriptor.
     public func inquireQuality(_ candidate: SecureBytes) async throws -> Int {
-        // Build "INQUIRE QUALITY <escaped>\n" inside the secure buffer's
-        // unsafe-bytes scope. The intermediate `Data` carries the *escaped*
-        // form, which is the value about to be transmitted on the wire.
-        let line: Data = candidate.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> Data in
-            var d = Data()
-            d.reserveCapacity(16 + buf.count * 3 + 1)
-            d.append(contentsOf: "INQUIRE QUALITY ".utf8)
-            LineCodec.escape(buf, into: &d)
-            d.append(0x0A)
-            return d
+        // FZ-1 companion: INQUIRE QUALITY does not support D-line
+        // continuation (it's a single-shot prompt), so refuse to even
+        // send candidates that would produce a wire line longer than
+        // the spec cap. The keystroke-driven quality path is best-effort;
+        // returning 0 on overflow is safer than tripping the peer's
+        // line-length check.
+        let candidateLength = candidate.withUnsafeBytes { $0.count }
+        if candidateLength > Self.maxQualityCandidateSourceBytes {
+            return 0
         }
-        try writeAll(line)
+
+        // SL-1 companion: build "INQUIRE QUALITY <escaped>\n" inside a
+        // SecureBytes-backed scratch buffer. The intermediate bytes
+        // are the *escaped* form, which for ASCII passphrases is byte-
+        // identical to the plaintext — keep them mlock'd and deinit-
+        // zeroed all the way out.
+        try candidate.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
+            // Worst-case wire size: 16 prefix + 3*N + 1 LF.
+            let cap = 16 + buf.count * 3 + 1
+            let lineBuf = SecureBytes(capacity: Swift.max(cap, 1))
+            for b in "INQUIRE QUALITY ".utf8 {
+                lineBuf.append(b)
+            }
+            // Inline data-line escape — same rules as Response.encodeDataLine
+            // so a literal '+' or space in the candidate round-trips
+            // through gpg-agent's quality estimator unchanged.
+            for b in buf {
+                switch b {
+                case 0x2B, 0x25, 0..<0x20, 0x7F...0xFF:
+                    lineBuf.append(0x25)
+                    let hi = b >> 4
+                    lineBuf.append(hi < 10 ? (0x30 + hi) : (0x41 + hi - 10))
+                    let lo = b & 0x0F
+                    lineBuf.append(lo < 10 ? (0x30 + lo) : (0x41 + lo - 10))
+                default:
+                    lineBuf.append(b)
+                }
+            }
+            lineBuf.append(0x0A)
+            try writeSecure(lineBuf)
+        }
 
         // Read until we see ERR/OK/CAN/END. Per upstream, the agent replies
         // with one or more `D` lines plus an OK. We only want the integer
         // from the first D line; later D lines are ignored.
         var gotValue: Int?
+        var seenLines = 0
         while true {
+            // AS-2: cap intervening lines so a hostile peer cannot pin
+            // the dialog inside this loop forever via streamed `D 0\n`.
+            if seenLines >= Self.maxQualityReplyLines {
+                throw SessionError.unexpectedResponse("INQUIRE QUALITY: too many reply lines")
+            }
+            seenLines += 1
             guard let reply = try readLine() else {
                 throw SessionError.unexpectedEOF
             }
@@ -269,6 +324,32 @@ public actor Session {
             try output.write(contentsOf: data)
         } catch {
             throw SessionError.ioError(errno: errno)
+        }
+    }
+
+    /// Write secret wire bytes directly from SecureBytes without first
+    /// materialising them in Foundation.Data heap.
+    private func writeSecure(_ secure: SecureBytes) throws {
+        try secure.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
+            guard let base = buf.baseAddress else { return }
+            var written = 0
+            while written < buf.count {
+                let n = Darwin.write(
+                    output.fileDescriptor,
+                    base.advanced(by: written),
+                    buf.count - written
+                )
+                if n < 0 {
+                    if errno == EINTR {
+                        continue
+                    }
+                    throw SessionError.ioError(errno: errno)
+                }
+                if n == 0 {
+                    throw SessionError.ioError(errno: EPIPE)
+                }
+                written += n
+            }
         }
     }
 }

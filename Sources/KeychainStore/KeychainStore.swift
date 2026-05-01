@@ -11,7 +11,7 @@
 //   kSecAttrAccount = <fingerprint>
 //   kSecAttrLabel   = <user-id>         (visible in Keychain Access)
 //
-// HARDENING (review H1):
+// HARDENING (review H1 + KC-1 / KC-2 / SL-2 / SL-3 / FV-1):
 // The legacy file-based keychain enforces a same-user-with-default-ACL
 // policy: any process running as the same user can read after the user
 // granted access once. For a passphrase-handling daemon that's a real
@@ -20,19 +20,30 @@
 // entries the user's gpg-agent will silently consume.
 //
 // New writes therefore go to the modern data-protection keychain
-// (kSecUseDataProtectionKeychain=true), where the ACL is enforced by
-// code signature: only an app with the same Developer Team ID + Bundle ID
-// can read the entry. Combined with `kSecAttrAccessible` set to
-// `WhenUnlockedThisDeviceOnly` and `kSecAttrSynchronizable=false`, the
-// entry is also (a) inaccessible while the device is locked and (b)
-// excluded from iCloud Keychain sync.
+// (kSecUseDataProtectionKeychain=true) with TWO factors of protection:
+//   1. Code-signature ACL — only an app with the same Team ID + Bundle ID
+//      can read the entry (data-protection backend default).
+//   2. .userPresence access-control flag — every read demands a fresh
+//      Touch ID / device-passcode confirmation. Combined with (1) this is
+//      the cardholder-presence guarantee the H1 review prescribed.
+// Plus `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (no read while
+// locked, no iCloud sync) and `kSecAttrSynchronizable=false`.
 //
-// On lookup we try the data-protection keychain first; if not found we
-// fall back to the legacy keychain (where pinentry-mac wrote and where
-// pre-review pinentry-darwin builds wrote). On a legacy hit we migrate:
-// re-store into the data-protection keychain and delete the legacy
-// entry. The migration is best-effort — if either step fails the original
-// bytes are still returned and the legacy entry stays put.
+// Lookup tries the data-protection keychain first; if the entry is missing
+// we probe the legacy keychain (where pinentry-mac and pre-H1 builds wrote)
+// and migrate on hit (re-store + legacy delete; best-effort).
+//
+// Ad-hoc-signed binaries (swift run, locally re-signed copies, third-party
+// rebuilds) cannot establish a stable application-identifier and so
+// data-protection writes return `errSecMissingEntitlement`. We DO NOT
+// silently fall back — the H1 attack model (legacy ACL = any-same-user)
+// would be fully restored if we did. Instead we throw
+// `KeychainStoreError.degradedNoEntitlement`; the UI is responsible for
+// surfacing the condition to the user (warning badge + log) before any
+// "Save in Keychain" tick takes effect. Legacy-keychain reads (for
+// pre-H1 migration) are still attempted on lookup; that path is read-only,
+// and we log the degraded posture exactly once per process via
+// `KeychainStore.degradedPostureObserved`.
 //
 // The `useDataProtectionKeychain` flag exists so tests (which run as a
 // `swift test` binary that may not have a stable signing identity) can
@@ -41,6 +52,20 @@
 import Foundation
 import Security
 import SecureMemory
+import os
+
+// MARK: - Logger
+
+/// One-shot guard so the missing-entitlement degraded-posture log fires
+/// at most once per process. After the first occurrence the application
+/// posture (`degradedPostureObserved`) is the authoritative signal and
+/// the UI surfaces it; further log spam adds no value.
+private let entitlementLogFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+private let keychainLogger = Logger(
+    subsystem: "org.whitworth.pinentry-darwin",
+    category: "keychain"
+)
 
 // MARK: - Errors
 
@@ -52,11 +77,34 @@ public enum KeychainStoreError: Error, Equatable {
 
     /// The user denied keychain access (errSecUserCanceled).
     case userCanceled
+
+    /// The data-protection keychain rejected the operation with
+    /// `errSecMissingEntitlement` (-34018). This is the failure mode for
+    /// ad-hoc-signed binaries that lack a stable application-identifier.
+    /// We throw rather than silently fall back to the weaker legacy
+    /// backend (KC-2): the UI MUST surface this so the user understands
+    /// that "Save in Keychain" is not available with the current
+    /// signing posture.
+    case degradedNoEntitlement
+
+    /// Building the in-process AccessControl for a `.userPresence`-gated
+    /// write failed (KC-1). Wraps the underlying `CFError` description for
+    /// diagnostic logging.
+    case accessControlFailed(String)
 }
 
 // MARK: - KeychainStore
 
 public struct KeychainStore: Sendable {
+
+    /// Process-wide flag set the first time the data-protection keychain
+    /// rejects an operation with `errSecMissingEntitlement` (FV-1). The UI
+    /// reads this to render a "running in degraded posture" badge so the
+    /// user knows the ad-hoc binary cannot use the hardened keychain
+    /// backend. Production Developer-ID builds never trip this.
+    public static var degradedPostureObserved: Bool {
+        entitlementLogFlag.withLock { $0 }
+    }
 
     /// Service name. Production code uses the default "GnuPG" (the value
     /// pinentry-mac writes). Tests inject a unique service so they can run
@@ -64,31 +112,31 @@ public struct KeychainStore: Sendable {
     private let service: String
 
     /// When true, new writes target the modern data-protection keychain
-    /// where the ACL is enforced by code signature. When false, all
+    /// with `.userPresence` AccessControl (KC-1). When false, all
     /// operations go to the legacy file-based keychain (matches
-    /// pinentry-mac's wire-compatible layout exactly).
-    ///
-    /// Defaults to true. Per-call fallback: if a write to the data-
-    /// protection keychain returns `errSecMissingEntitlement` (-34018)
-    /// — the failure mode for ad-hoc-signed binaries that lack a stable
-    /// Apple-issued code identity — `store(...)` automatically falls
-    /// back to the legacy backend. Reads (`lookup`) probe the data-
-    /// protection keychain first and likewise degrade on entitlement
-    /// failure. Production Developer ID builds never trip the fallback
-    /// because the kernel grants them the entitlement implicitly via
-    /// their `application-identifier` derived from Team ID + Bundle ID;
-    /// the os_log entry on each fallback makes regressions auditable.
+    /// pinentry-mac's wire-compatible layout exactly) and no AccessControl
+    /// is applied.
     ///
     /// Tests pass `false` explicitly to pin themselves on the legacy
-    /// backend regardless of the host's signing posture.
+    /// backend regardless of the host's signing posture. Production code
+    /// uses the default (true).
     private let useDataProtectionKeychain: Bool
+
+    /// When true (the default for production), data-protection writes
+    /// include `SecAccessControlCreateWithFlags(.userPresence)` so every
+    /// read triggers a Touch ID / device-passcode prompt. Disable only for
+    /// integration tests that need to round-trip without biometric
+    /// hardware; the default is the secure choice.
+    private let requireUserPresence: Bool
 
     public init(
         service: String = "GnuPG",
-        useDataProtectionKeychain: Bool = true
+        useDataProtectionKeychain: Bool = true,
+        requireUserPresence: Bool = true
     ) {
         self.service = service
         self.useDataProtectionKeychain = useDataProtectionKeychain
+        self.requireUserPresence = requireUserPresence
     }
 
     // MARK: Lookup
@@ -105,7 +153,8 @@ public struct KeychainStore: Sendable {
     public func lookup(fingerprint: String) throws -> SecureBytes? {
         // 1. Try the configured primary backend. If the data-protection
         //    keychain rejects with errSecMissingEntitlement (ad-hoc dev
-        //    build), short-circuit straight to the legacy backend.
+        //    build), record the degraded posture (FV-1) and probe the
+        //    legacy backend read-only — no fallback write.
         do {
             if let bytes = try rawLookup(
                 fingerprint: fingerprint,
@@ -116,8 +165,14 @@ public struct KeychainStore: Sendable {
         } catch KeychainStoreError.unexpectedStatus(let s)
             where s == errSecMissingEntitlement && useDataProtectionKeychain
         {
-            // No entitlement → can't read from data-protection at all.
-            // Skip migration; just go legacy.
+            recordDegradedPosture(operation: "lookup", status: s)
+            // Read-only legacy probe. We do NOT migrate from the legacy
+            // backend in this branch because migration would require a
+            // data-protection write, which is exactly what we just learned
+            // we cannot perform. Returning the legacy bytes lets the user
+            // continue to use the cached passphrase even on an ad-hoc
+            // build, while the UI's degraded-posture badge tells them
+            // why "Save in Keychain" is unavailable for new entries.
             return try rawLookup(fingerprint: fingerprint, dataProtection: false)
         }
         // 2. Migration: when primary is data-protection, also probe legacy
@@ -154,6 +209,10 @@ public struct KeychainStore: Sendable {
                 // succeeded; otherwise we'd lose the user's cached
                 // passphrase entirely.
                 try? rawClear(fingerprint: fingerprint, dataProtection: false)
+            } catch KeychainStoreError.degradedNoEntitlement {
+                // Migration from legacy needs a DP write; without
+                // entitlement the legacy entry stays put. Posture log
+                // already emitted by rawStore.
             } catch {
                 // Migration failed but the value is still good — return it.
             }
@@ -169,33 +228,22 @@ public struct KeychainStore: Sendable {
     ///
     /// If `label` is nil the service name ("GnuPG") is used (matches
     /// KeychainSupport.m:46-47).
+    ///
+    /// Throws `KeychainStoreError.degradedNoEntitlement` when the
+    /// data-protection backend rejects with `errSecMissingEntitlement`
+    /// (ad-hoc-signed binary). The store DOES NOT silently fall back to
+    /// the legacy backend (KC-2) — the caller MUST surface the condition.
     public func store(
         fingerprint: String,
         label: String?,
         passphrase: SecureBytes
     ) throws {
-        do {
-            try rawStore(
-                fingerprint: fingerprint,
-                label: label,
-                passphrase: passphrase,
-                dataProtection: useDataProtectionKeychain
-            )
-        } catch KeychainStoreError.unexpectedStatus(let s)
-            where s == errSecMissingEntitlement && useDataProtectionKeychain
-        {
-            // Ad-hoc-signed binaries cannot write to the data-protection
-            // keychain (no stable application-identifier). Degrade to
-            // the legacy file-based keychain so the user still gets a
-            // working "Save in Keychain" affordance during development.
-            // Production Developer ID builds never reach this path.
-            try rawStore(
-                fingerprint: fingerprint,
-                label: label,
-                passphrase: passphrase,
-                dataProtection: false
-            )
-        }
+        try rawStore(
+            fingerprint: fingerprint,
+            label: label,
+            passphrase: passphrase,
+            dataProtection: useDataProtectionKeychain
+        )
     }
 
     // MARK: Clear
@@ -203,7 +251,9 @@ public struct KeychainStore: Sendable {
     /// Delete the entry for `fingerprint`. Idempotent: missing entries are
     /// not an error. When the primary is the data-protection keychain we
     /// also best-effort delete from the legacy keychain so a stale
-    /// pre-migration entry doesn't survive.
+    /// pre-migration entry doesn't survive (KC-6: `try?` here means
+    /// synchronizable / ACL-locked entries that decline the delete are
+    /// tolerated; idempotent clear is the contract).
     public func clear(fingerprint: String) throws {
         try rawClear(fingerprint: fingerprint, dataProtection: useDataProtectionKeychain)
         if useDataProtectionKeychain {
@@ -231,22 +281,49 @@ public struct KeychainStore: Sendable {
         return query
     }
 
+    /// Build the AccessControl object that gates data-protection reads on
+    /// fresh user presence (KC-1). The access constant baked into the
+    /// access-control object replaces the standalone kSecAttrAccessible —
+    /// they cannot both be set. Returns nil if not requested.
+    private func makeAccessControl() throws -> SecAccessControl? {
+        guard requireUserPresence else { return nil }
+        var error: Unmanaged<CFError>?
+        guard let control = SecAccessControlCreateWithFlags(
+            kCFAllocatorDefault,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            [.userPresence],
+            &error
+        ) else {
+            let detail = error.map { String(describing: $0.takeRetainedValue()) }
+                ?? "SecAccessControlCreateWithFlags returned nil"
+            throw KeychainStoreError.accessControlFailed(detail)
+        }
+        return control
+    }
+
     /// Build the attributes used for an insert/update. Adds the data
-    /// payload, the label, and the WhenUnlockedThisDeviceOnly accessibility
-    /// constraint that prevents read-while-locked AND iCloud sync.
+    /// payload, the label, and either the AccessControl object (data
+    /// protection + .userPresence) OR the standalone kSecAttrAccessible
+    /// constant (legacy / non-presence-gated path).
     private func writeAttributes(
         label: String,
         data: CFData,
-        dataProtection: Bool
+        dataProtection: Bool,
+        accessControl: SecAccessControl?
     ) -> [String: Any] {
         var attrs: [String: Any] = [
             kSecAttrLabel as String:          label,
             kSecValueData as String:          data,
-            kSecAttrAccessible as String:     kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
             kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
         ]
         if dataProtection {
             attrs[kSecUseDataProtectionKeychain as String] = kCFBooleanTrue as Any
+        }
+        if let accessControl {
+            // AccessControl bakes in the accessibility constant.
+            attrs[kSecAttrAccessControl as String] = accessControl
+        } else {
+            attrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         }
         return attrs
     }
@@ -258,16 +335,18 @@ public struct KeychainStore: Sendable {
         var query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
         query[kSecReturnData as String] = kCFBooleanTrue as Any
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-        // Critical: cache lookup MUST NOT block on a system Keychain ACL
-        // prompt. gpg-agent invokes pinentry on every uncached operation
-        // and the GETPIN dialog can't render until lookup returns; a
-        // synchronous "Allow / Always Allow / Deny" sheet would deadlock
-        // the user behind their own pinentry. With UISkip the framework
-        // returns errSecInteractionNotAllowed instead — we treat that as
-        // "cache miss" so the dialog renders immediately and the user
-        // can grant ACL during the *store* path on submit (where the UI
-        // is expected and correct).
-        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        // Critical: cache lookup MUST NOT silently block. With .userPresence
+        // ACL on data-protection writes the system will present a Touch ID /
+        // passcode sheet on read, which is the expected UX for a hardened
+        // cache. We allow that prompt by not setting kSecUseAuthenticationUI
+        // at all (the default is kSecUseAuthenticationUIAllow).
+        //
+        // For the legacy migration probe, we DO request UISkip — the legacy
+        // ACL prompt is the deadlock the original code path comment warned
+        // about, and migration is opportunistic anyway.
+        if !dataProtection {
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        }
 
         var status = OSStatus(errSecSuccess)
         var item: CFTypeRef?
@@ -287,7 +366,10 @@ public struct KeychainStore: Sendable {
             break
         case errSecItemNotFound, errSecInteractionNotAllowed:
             // Both flow back as "cache miss" — InteractionNotAllowed is
-            // the success path for the UISkip suppression above.
+            // the success path for the legacy UISkip suppression above.
+            // For data-protection it would mean the .userPresence prompt
+            // was declined or unavailable; treat as miss so the UI falls
+            // through to GETPIN.
             return nil
         case errSecUserCanceled:
             throw KeychainStoreError.userCanceled
@@ -295,29 +377,36 @@ public struct KeychainStore: Sendable {
             throw KeychainStoreError.unexpectedStatus(status)
         }
 
-        guard let data = item as? Data else {
-            // Should not happen if SecItemCopyMatching returned success with
-            // kSecReturnData=true, but treat it as an unexpected condition.
+        // SL-2: do NOT bridge through Swift `Data`. The Swift Data bridge
+        // is copy-on-write over the CFData backing buffer; calling
+        // `withUnsafeMutableBytes` triggers a COW allocation, so any
+        // wipe through that view zeroes only the COW copy and never the
+        // CFData backing the secret. Use the CFData APIs directly.
+        guard let itemRef = item else {
             throw KeychainStoreError.unexpectedStatus(errSecInternalError)
         }
-
-        // Copy bytes into a SecureBytes (mlock'd, deinit-zeroed) and then
-        // best-effort overwrite the underlying Data buffer. `Data` is a
-        // value type with copy-on-write semantics, so this only zeroes our
-        // local copy; CFData backing memory is owned by CF and we cannot
-        // reliably wipe it.
-        var data2 = data
-        let secure = data2.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) -> SecureBytes in
-            let bound = raw.bindMemory(to: UInt8.self)
-            let buf = UnsafeBufferPointer<UInt8>(start: bound.baseAddress, count: bound.count)
-            let bytes = SecureBytes(copying: buf)
-            // Best-effort wipe of the local Data copy. memset_s would be
-            // stronger but Data does not guarantee non-elision.
-            if let base = bound.baseAddress, bound.count > 0 {
-                base.update(repeating: 0, count: bound.count)
-            }
-            return bytes
+        guard CFGetTypeID(itemRef) == CFDataGetTypeID() else {
+            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
         }
+        let cfData = itemRef as! CFData
+        let length = CFDataGetLength(cfData)
+        if length == 0 {
+            // SL-8: a zero-length entry would crash SecureBytes(copying:)'s
+            // precondition. Treat zero-length stored payloads as "no
+            // useful cache" rather than panic. The store path itself
+            // refuses zero-length passphrases, but a hostile or corrupted
+            // pre-existing keychain entry could carry one.
+            return nil
+        }
+        guard let bytesPtr = CFDataGetBytePtr(cfData) else {
+            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
+        }
+        let buf = UnsafeBufferPointer<UInt8>(start: bytesPtr, count: length)
+        let secure = SecureBytes(copying: buf)
+        // CFData ref is owned by `item` / `itemRef`; releasing it returns
+        // the bytes to the CF allocator pool unwiped (a known macOS
+        // keychain reality outside our control). The fact that we never
+        // bridged to Swift Data means at least no COW copy persists.
         return secure
     }
 
@@ -342,18 +431,49 @@ public struct KeychainStore: Sendable {
             attempts += 1
         } while probeStatus == errSecAuthFailed && attempts < 2
 
-        // Build a CFData around a copy of the passphrase bytes. The CFData
-        // is released as soon as this method returns; SecItem* APIs copy
-        // their input internally so we don't have to keep it alive.
+        // KC-2: probe itself can return errSecMissingEntitlement on an
+        // ad-hoc binary. Translate to the typed degraded-posture error
+        // before any write attempt.
+        if probeStatus == errSecMissingEntitlement && dataProtection {
+            recordDegradedPosture(operation: "store-probe", status: probeStatus)
+            throw KeychainStoreError.degradedNoEntitlement
+        }
+
+        // KC-1: build the AccessControl up front so any failure reports
+        // before we touch the keychain. nil for legacy / opt-out paths.
+        let accessControl = dataProtection ? try makeAccessControl() : nil
+
+        // SL-3: build a CFData around the passphrase bytes WITHOUT copying.
+        // CFDataCreateWithBytesNoCopy + kCFAllocatorNull tells CF to use
+        // the buffer in place and never free it. The buffer lives inside
+        // the SecureBytes-backed mlock'd page, which is wiped via
+        // memset_s on the SecureBytes deinit / scope exit. CFRelease on
+        // cfData therefore does not leak unwiped cleartext into the CF
+        // allocator pool, and SecItem* APIs copy the bytes into their
+        // own internal buffer (which is outside our control either way).
         try passphrase.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
-            let cfData = CFDataCreate(kCFAllocatorDefault, buf.baseAddress, buf.count)!
+            guard buf.count > 0, let base = buf.baseAddress else {
+                // SL-8: refuse zero-length writes — they would create a
+                // useless keychain entry and crash the rawLookup
+                // SecureBytes precondition on read-back.
+                throw KeychainStoreError.unexpectedStatus(errSecParam)
+            }
+            guard let cfData = CFDataCreateWithBytesNoCopy(
+                kCFAllocatorDefault,
+                base,
+                buf.count,
+                kCFAllocatorNull
+            ) else {
+                throw KeychainStoreError.unexpectedStatus(errSecAllocate)
+            }
 
             if probeStatus == errSecSuccess {
                 // Update existing.
                 let attrs = writeAttributes(
                     label: resolvedLabel,
                     data: cfData,
-                    dataProtection: dataProtection
+                    dataProtection: dataProtection,
+                    accessControl: accessControl
                 )
                 var status = OSStatus(errSecSuccess)
                 var tries = 0
@@ -361,14 +481,15 @@ public struct KeychainStore: Sendable {
                     status = SecItemUpdate(probe as CFDictionary, attrs as CFDictionary)
                     tries += 1
                 } while status == errSecAuthFailed && tries < 2
-                try Self.translate(status)
+                try translateWriteStatus(status, dataProtection: dataProtection, op: "update")
             } else if probeStatus == errSecItemNotFound {
                 // Add new. Merge identity attributes with write attrs.
                 var add = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
                 for (k, v) in writeAttributes(
                     label: resolvedLabel,
                     data: cfData,
-                    dataProtection: dataProtection
+                    dataProtection: dataProtection,
+                    accessControl: accessControl
                 ) {
                     add[k] = v
                 }
@@ -378,7 +499,7 @@ public struct KeychainStore: Sendable {
                     status = SecItemAdd(add as CFDictionary, nil)
                     tries += 1
                 } while status == errSecAuthFailed && tries < 2
-                try Self.translate(status)
+                try translateWriteStatus(status, dataProtection: dataProtection, op: "add")
             } else if probeStatus == errSecUserCanceled {
                 throw KeychainStoreError.userCanceled
             } else {
@@ -410,6 +531,10 @@ public struct KeychainStore: Sendable {
             return
         case errSecUserCanceled:
             throw KeychainStoreError.userCanceled
+        case errSecMissingEntitlement where dataProtection:
+            recordDegradedPosture(operation: "clear", status: status)
+            // Idempotent contract: we can't delete what we can't see.
+            return
         default:
             throw KeychainStoreError.unexpectedStatus(status)
         }
@@ -417,14 +542,43 @@ public struct KeychainStore: Sendable {
 
     // MARK: Helpers
 
-    private static func translate(_ status: OSStatus) throws {
+    private func translateWriteStatus(
+        _ status: OSStatus,
+        dataProtection: Bool,
+        op: String
+    ) throws {
         switch status {
         case errSecSuccess:
             return
         case errSecUserCanceled:
             throw KeychainStoreError.userCanceled
+        case errSecMissingEntitlement where dataProtection:
+            recordDegradedPosture(operation: "store-\(op)", status: status)
+            throw KeychainStoreError.degradedNoEntitlement
         default:
             throw KeychainStoreError.unexpectedStatus(status)
+        }
+    }
+
+    /// Set the process-wide degraded-posture flag and emit a single
+    /// os_log line on first occurrence (FV-1). Subsequent calls are
+    /// silent — the UI has already been told via
+    /// `KeychainStore.degradedPostureObserved`.
+    private func recordDegradedPosture(operation: String, status: OSStatus) {
+        let firstTime = entitlementLogFlag.withLock { state -> Bool in
+            let was = state
+            state = true
+            return !was
+        }
+        if firstTime {
+            keychainLogger.error("""
+                Data-protection keychain refused \(operation, privacy: .public): \
+                OSStatus=\(status, privacy: .public). \
+                Binary lacks application-identifier entitlement (typical for \
+                ad-hoc-signed builds). Degraded posture: cached writes are \
+                disabled, only legacy reads continue. UI should surface this \
+                via KeychainStore.degradedPostureObserved.
+                """)
         }
     }
 }
