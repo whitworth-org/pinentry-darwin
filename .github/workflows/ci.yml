@@ -4,7 +4,8 @@
 # Security model:
 #   - No secrets are referenced anywhere in this workflow; PR runs from forks
 #     would have read-only secrets anyway, but we make the absence explicit.
-#   - Workflow-level permissions are read-only; no job elevates.
+#   - Workflow-level permissions deny everything by default; the build job
+#     opts in only to the minimum scopes it needs (contents+actions read).
 #   - Runner is hardened via step-security/harden-runner (audit mode for now).
 #   - Checkout uses persist-credentials: false so the GITHUB_TOKEN is not left
 #     on disk for subsequent steps.
@@ -22,8 +23,7 @@ on:
       - '**/*.md'
       - 'LICENSE'
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -34,6 +34,9 @@ jobs:
     name: build-test-audit
     runs-on: macos-15
     timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
     steps:
       - name: Harden runner
         uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
