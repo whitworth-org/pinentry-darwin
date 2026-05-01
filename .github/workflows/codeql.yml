@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: MIT
+# CodeQL: Swift static analysis for security-and-quality findings.
+#
+# Security model:
+#   - No build secrets are referenced; CodeQL traces a debug build only.
+#   - Workflow-level permissions deny everything by default; the analyze
+#     job opts in to the minimum CodeQL needs (security-events:write to
+#     upload SARIF, plus read access to actions metadata and repo contents).
+#   - Runner is hardened via step-security/harden-runner (audit mode for
+#     now; flip to block in a follow-up after observing egress on a few
+#     post-public runs).
+#
+# This workflow was deleted while the repo was private on Free tier
+# because SARIF upload to GitHub code-scanning required GHAS, which was
+# unavailable. With the repo now public, code-scanning is free and the
+# upload succeeds. Findings appear in the Security tab.
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Mondays at 08:00 UTC
+    - cron: '0 8 * * 1'
+
+permissions: {}
+
+jobs:
+  analyze:
+    name: analyze-swift
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@65216971a11ded447a6b76263d5a144519e5eee1 # codeql-bundle-v2.25.2
+        with:
+          languages: swift
+          queries: security-and-quality
+
+      - name: Build (debug, for CodeQL tracing)
+        run: |
+          set -euo pipefail
+          swift build -c debug
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@65216971a11ded447a6b76263d5a144519e5eee1 # codeql-bundle-v2.25.2
+        with:
+          category: "/language:swift"
