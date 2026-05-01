@@ -33,3 +33,10 @@ dist/*
 .vscode/
 *.swp
 *~
+
+# Signing / notarization material — must NEVER be committed
+*.p8
+*.p12
+*.b64
+AuthKey_*
+
