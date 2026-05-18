@@ -42,12 +42,20 @@ final class KeychainStoreTests: XCTestCase {
     /// hitting that path here would surface as errSecMissingEntitlement.
     /// Production code uses the default (true) which routes through the
     /// modern, code-signature-ACL'd keychain.
+    ///
+    /// `useSecureEnclaveWrap: false` isolates the raw keychain layer from
+    /// the Tier 3 SE wrap path. Production `lookup` threads a
+    /// `SETDESC`-derived `LAContext` through `AssuanLoop` to unwrap; the
+    /// raw-keychain tests below construct no such context and only need
+    /// to exercise store/lookup/clear of plain bytes. SE wrap has its
+    /// own coverage in `SecureEnclaveWrapTests`.
     private func makeStore() -> (KeychainStore, String) {
         let unique = UUID().uuidString
         return (
             KeychainStore(
                 service: "GnuPG-test-\(unique)",
-                useDataProtectionKeychain: false
+                useDataProtectionKeychain: false,
+                useSecureEnclaveWrap: false
             ),
             "fingerprint-\(unique)"
         )
