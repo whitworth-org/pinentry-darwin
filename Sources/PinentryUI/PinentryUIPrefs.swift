@@ -37,6 +37,11 @@ public struct UISettings: Sendable, Codable, Equatable {
     /// conflicts with SKE can disable. Matches the behaviour Apple's
     /// Keychain Access prompts use.
     public var secureKeyboardEntry: Bool = true
+    /// When the user paste-fills the passphrase field, wipe
+    /// `NSPasteboard.general` on submit so the cleartext doesn't
+    /// linger in the system clipboard. Detected via change-count
+    /// delta — we never inspect pasteboard contents. Default ON.
+    public var clearPasteboardOnSubmit: Bool = true
 
     public init(
         theme: Theme = .system,
@@ -44,7 +49,8 @@ public struct UISettings: Sendable, Codable, Equatable {
         defaultTimeout: Int = 0,
         closeOnBlur: Bool = false,
         beepOnWeakPassphrase: Bool = false,
-        secureKeyboardEntry: Bool = true
+        secureKeyboardEntry: Bool = true,
+        clearPasteboardOnSubmit: Bool = true
     ) {
         self.theme = theme
         self.titlebarStyle = titlebarStyle
@@ -52,6 +58,7 @@ public struct UISettings: Sendable, Codable, Equatable {
         self.closeOnBlur = closeOnBlur
         self.beepOnWeakPassphrase = beepOnWeakPassphrase
         self.secureKeyboardEntry = secureKeyboardEntry
+        self.clearPasteboardOnSubmit = clearPasteboardOnSubmit
     }
 }
 

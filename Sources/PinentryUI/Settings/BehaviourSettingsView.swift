@@ -52,6 +52,13 @@ public struct BehaviourSettingsView: View {
                     .font(Theme.captionFont)
                     .foregroundStyle(Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                Toggle("Clear clipboard after paste", isOn: $settings.clearPasteboardOnSubmit)
+                    .onChange(of: settings.clearPasteboardOnSubmit) { _, _ in onChange(settings) }
+                Text("If you paste a passphrase into the dialog, clear the system clipboard on submit so the cleartext doesn't linger. Detected via clipboard change-count; the contents are never inspected.")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .padding(Theme.mediumPadding)

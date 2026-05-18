@@ -27,6 +27,12 @@ public struct PinView: View {
     /// observe UISettingsStore itself.
     public let secureKeyboardEntry: Bool
 
+    /// Whether to wipe `NSPasteboard.general` on submit when the change
+    /// count advanced during the dialog's lifetime (i.e. the user
+    /// paste-filled the passphrase). Driven by
+    /// UISettings.clearPasteboardOnSubmit.
+    public let clearPasteboardOnSubmit: Bool
+
     @Bindable public var model: PinViewModel
 
     /// SwiftUI text-storage scratch. We *write* into this on every change
@@ -46,13 +52,23 @@ public struct PinView: View {
     /// the ultimate backstop.
     @State private var skeActive: Bool = false
 
-    @FocusState private var focusedField: PinField?
-    private enum PinField: Hashable { case pin, repeatPin }
+    /// `NSPasteboard.general.changeCount` snapshot taken on appear. We
+    /// compare against this on submit to detect that a paste (or any
+    /// other pasteboard write) happened during the dialog's lifetime
+    /// and clear the pasteboard if the user has opted in. -1 sentinel
+    /// means "not snapshotted yet" so we never clear without a baseline.
+    @State private var pasteboardBaseline: Int = -1
 
-    public init(spec: DialogSpec, model: PinViewModel, secureKeyboardEntry: Bool = true) {
+    public init(
+        spec: DialogSpec,
+        model: PinViewModel,
+        secureKeyboardEntry: Bool = true,
+        clearPasteboardOnSubmit: Bool = true
+    ) {
         self.spec = spec
         self.model = model
         self.secureKeyboardEntry = secureKeyboardEntry
+        self.clearPasteboardOnSubmit = clearPasteboardOnSubmit
     }
 
     public var body: some View {
@@ -75,10 +91,14 @@ public struct PinView: View {
                 skeActive = true
             }
 
-            // Seed focus synchronously. SwiftUI defers @FocusState
-            // application until after the view tree is committed, so
-            // setting it in onAppear's body is sufficient.
-            focusedField = .pin
+            // Snapshot the pasteboard change-count so we can detect a
+            // paste-fill on submit without ever inspecting clipboard
+            // contents.
+            pasteboardBaseline = PasteboardGuard.snapshot()
+
+            // The pin field carries `becomesFirstResponderOnAppear: true`
+            // so AppKit grabs focus the moment it mounts; no SwiftUI
+            // FocusState plumbing required.
 
             withAnimation(.easeOut(duration: Theme.entranceDuration)) {
                 appeared = true
@@ -240,7 +260,7 @@ public struct PinView: View {
                 binding: $pinText,
                 onChange: { model.setPin(from: $0) },
                 accessibilityLabel: spec.resolvedPrompt,
-                focus: .pin
+                isPinRow: true
             )
         }
         .padding(.top, Theme.smallPadding)
@@ -258,7 +278,7 @@ public struct PinView: View {
                 binding: $repeatText,
                 onChange: { model.setRepeat(from: $0) },
                 accessibilityLabel: label,
-                focus: .repeatPin
+                isPinRow: false
             )
         }
     }
@@ -322,7 +342,7 @@ public struct PinView: View {
             }
 
             Button {
-                model.submit()
+                handleSubmit()
             } label: {
                 if model.isSubmitting {
                     HStack(spacing: 6) {
@@ -344,9 +364,11 @@ public struct PinView: View {
 
     // MARK: - Field
 
-    /// SecureField (or TextField when revealed via the Show typing
-    /// checkbox) using the canonical macOS rounded-border style for
-    /// guaranteed input handling.
+    /// HardenedSecureField (or HardenedTextField when revealed via the
+    /// Show typing checkbox) — both AppKit-backed wrappers with every
+    /// auto-substitution / spell-correction / character-picker behaviour
+    /// explicitly off and the field editor's undo manager disabled.
+    /// See `HardenedSecureField.swift` for the full hardening surface.
     ///
     /// We intercept binding writes via a wrapper Binding so the model's
     /// `setPin(from:)` fires *synchronously* on every keystroke. The
@@ -357,12 +379,17 @@ public struct PinView: View {
     /// hierarchy and back-filled the model on rebuild). Wrapping the
     /// binding makes the side-effect deterministic, regardless of which
     /// field type is currently mounted or how SwiftUI batches updates.
+    ///
+    /// Focus: the pin row auto-focuses on first appear and on any
+    /// Show typing rebuild. The repeat row never auto-focuses; the
+    /// user tabs / clicks into it. AppKit's automatic nextKeyView
+    /// chain handles tab navigation between fields.
     @ViewBuilder
     private func pinField(
         binding: Binding<String>,
         onChange: @escaping (String) -> Void,
         accessibilityLabel: String,
-        focus: PinField
+        isPinRow: Bool
     ) -> some View {
         let intercepted = Binding<String>(
             get: { binding.wrappedValue },
@@ -372,17 +399,33 @@ public struct PinView: View {
             }
         )
         if model.showTyping {
-            TextField("", text: intercepted)
-                .textFieldStyle(.roundedBorder)
-                .font(Theme.inputFont)
-                .focused($focusedField, equals: focus)
-                .accessibilityLabel(Text(verbatim: accessibilityLabel))
+            HardenedTextField(
+                text: intercepted,
+                becomesFirstResponderOnAppear: isPinRow,
+                onSubmit: { handleSubmit() }
+            )
+            .accessibilityLabel(Text(verbatim: accessibilityLabel))
         } else {
-            SecureField("", text: intercepted)
-                .textFieldStyle(.roundedBorder)
-                .font(Theme.inputFont)
-                .focused($focusedField, equals: focus)
-                .accessibilityLabel(Text(verbatim: accessibilityLabel))
+            HardenedSecureField(
+                text: intercepted,
+                becomesFirstResponderOnAppear: isPinRow,
+                onSubmit: { handleSubmit() }
+            )
+            .accessibilityLabel(Text(verbatim: accessibilityLabel))
         }
+    }
+
+    /// All paths that submit the dialog go through this single method:
+    /// OK button click, Return-key shortcut on the OK button, and the
+    /// HardenedSecureField's own Return-key handler. We snapshot-and-
+    /// clear the system pasteboard here so any paste-fill leaves no
+    /// residue before the model resolves.
+    private func handleSubmit() {
+        guard model.canSubmit, !model.isSubmitting else { return }
+        PasteboardGuard.clearIfAdvanced(
+            since: pasteboardBaseline,
+            enabled: clearPasteboardOnSubmit
+        )
+        model.submit()
     }
 }

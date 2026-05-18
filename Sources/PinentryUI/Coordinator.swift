@@ -107,7 +107,8 @@ public final class PinentryCoordinator {
             let root = applyTheme(PinView(
                 spec: spec,
                 model: model,
-                secureKeyboardEntry: uiSettings.secureKeyboardEntry
+                secureKeyboardEntry: uiSettings.secureKeyboardEntry,
+                clearPasteboardOnSubmit: uiSettings.clearPasteboardOnSubmit
             ))
             window = makePinentryWindow(rootView: root, title: spec.title)
 
