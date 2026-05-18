@@ -181,20 +181,29 @@ public struct KeychainStore: Sendable {
     /// second prompt for follow-up SE ECDH operations in Tier 3.
     public func lookup(
         fingerprint: String,
+        policy: KeyPolicy? = nil,
         context: LAContext? = nil
     ) throws -> SecureBytes? {
+        let resolvedPolicy = policy ?? defaultPolicy
         // 1. Try the configured primary backend. If the data-protection
         //    keychain rejects with errSecMissingEntitlement (ad-hoc dev
         //    build), record the degraded posture (FV-1) and probe the
         //    legacy backend read-only — no fallback write.
         do {
-            if let bytes = try rawLookup(
+            if let lookup = try rawLookupWithAttrs(
                 fingerprint: fingerprint,
                 dataProtection: useDataProtectionKeychain,
                 context: context
             ) {
+                if let expired = expireIfStale(
+                    fingerprint: fingerprint,
+                    creationDate: lookup.creationDate,
+                    policy: resolvedPolicy
+                ), expired {
+                    return nil
+                }
                 return try unwrapIfNeeded(
-                    bytes: bytes,
+                    bytes: lookup.bytes,
                     fingerprint: fingerprint,
                     context: context
                 )
@@ -210,13 +219,20 @@ public struct KeychainStore: Sendable {
             // continue to use the cached passphrase even on an ad-hoc
             // build, while the UI's degraded-posture badge tells them
             // why "Save in Keychain" is unavailable for new entries.
-            if let bytes = try rawLookup(
+            if let lookup = try rawLookupWithAttrs(
                 fingerprint: fingerprint,
                 dataProtection: false,
                 context: nil
             ) {
+                if let expired = expireIfStale(
+                    fingerprint: fingerprint,
+                    creationDate: lookup.creationDate,
+                    policy: resolvedPolicy
+                ), expired {
+                    return nil
+                }
                 return try unwrapIfNeeded(
-                    bytes: bytes,
+                    bytes: lookup.bytes,
                     fingerprint: fingerprint,
                     context: context
                 )
@@ -577,6 +593,89 @@ public struct KeychainStore: Sendable {
         // keychain reality outside our control). The fact that we never
         // bridged to Swift Data means at least no COW copy persists.
         return secure
+    }
+
+    /// Same as `rawLookup` but additionally returns the entry's
+    /// `kSecAttrCreationDate` so the caller can enforce a cache TTL.
+    /// Implemented as a separate function to avoid disturbing the
+    /// well-tested rawLookup that the legacy migration probe relies on.
+    struct LookupWithAttrs {
+        let bytes: SecureBytes
+        let creationDate: Date?
+    }
+
+    private func rawLookupWithAttrs(
+        fingerprint: String,
+        dataProtection: Bool,
+        context: LAContext?
+    ) throws -> LookupWithAttrs? {
+        var query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+        query[kSecReturnData as String] = kCFBooleanTrue as Any
+        query[kSecReturnAttributes as String] = kCFBooleanTrue as Any
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        if !dataProtection {
+            query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        } else if let context {
+            query[kSecUseAuthenticationContext as String] = context
+        }
+
+        var status = OSStatus(errSecSuccess)
+        var item: CFTypeRef?
+        var attempts = 0
+        repeat {
+            item = nil
+            status = SecItemCopyMatching(query as CFDictionary, &item)
+            attempts += 1
+        } while status == errSecAuthFailed && attempts < 2
+
+        switch status {
+        case errSecSuccess:
+            break
+        case errSecItemNotFound, errSecInteractionNotAllowed:
+            return nil
+        case errSecUserCanceled:
+            throw KeychainStoreError.userCanceled
+        default:
+            throw KeychainStoreError.unexpectedStatus(status)
+        }
+
+        guard let itemRef = item,
+              CFGetTypeID(itemRef) == CFDictionaryGetTypeID()
+        else {
+            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
+        }
+        let dict = itemRef as! [String: Any]
+        guard let cfData = dict[kSecValueData as String] as! CFData? else {
+            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
+        }
+        let length = CFDataGetLength(cfData)
+        if length == 0 { return nil }
+        guard let bytesPtr = CFDataGetBytePtr(cfData) else {
+            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
+        }
+        let buf = UnsafeBufferPointer<UInt8>(start: bytesPtr, count: length)
+        let secure = SecureBytes(copying: buf)
+
+        let creationDate = dict[kSecAttrCreationDate as String] as? Date
+        return LookupWithAttrs(bytes: secure, creationDate: creationDate)
+    }
+
+    /// Return true if `creationDate + policy.cacheTTLSeconds < now`,
+    /// after clearing the stale entry. Nil cacheTTLSeconds = no expiry
+    /// (returns nil so the caller continues with the cached value).
+    /// Nil creationDate = unknown age (treat as fresh).
+    private func expireIfStale(
+        fingerprint: String,
+        creationDate: Date?,
+        policy: KeyPolicy
+    ) -> Bool? {
+        guard let ttl = policy.cacheTTLSeconds, ttl > 0 else { return nil }
+        guard let created = creationDate else { return false }
+        let age = Date().timeIntervalSince(created)
+        guard age > TimeInterval(ttl) else { return false }
+        keychainLogger.info("cache TTL expired (age=\(Int(age), privacy: .public)s ttl=\(ttl, privacy: .public)s); dropping entry")
+        try? clear(fingerprint: fingerprint)
+        return true
     }
 
     private func rawStore(

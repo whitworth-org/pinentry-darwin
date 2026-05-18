@@ -111,4 +111,26 @@ final class OptionStateTests: XCTestCase {
         XCTAssertEqual(s.defaultCfVisi, "Make passphrase visible?")
         XCTAssertEqual(s.defaultCapsHint, "Caps Lock is on")
     }
+
+    func testNoSymkeyCacheDefaultsFalse() {
+        let s = OptionState()
+        XCTAssertFalse(s.noSymkeyCache)
+    }
+
+    func testNoSymkeyCacheSetByOption() {
+        var s = OptionState()
+        s.apply(key: "no-symkey-cache", value: nil)
+        XCTAssertTrue(s.noSymkeyCache)
+    }
+
+    func testNoSymkeyCacheStickyOnceSet() {
+        // OPTION is a one-way latch in upstream pinentry — once
+        // gpg-agent says "no caching", it stays off for the session
+        // regardless of further OPTION traffic.
+        var s = OptionState()
+        s.apply(key: "no-symkey-cache", value: nil)
+        s.apply(key: "ttyname", value: "/dev/ttys001")
+        s.apply(key: "default-ok", value: "OK")
+        XCTAssertTrue(s.noSymkeyCache)
+    }
 }

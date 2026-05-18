@@ -44,6 +44,13 @@ public struct OptionState: Sendable, Equatable {
     public var touchFile: String?
     public var displayName: String?
 
+    /// `--no-symkey-cache` (Assuan OPTION). Set when gpg-agent tells us
+    /// not to cache the passphrase for symmetric-encryption operations.
+    /// The pinentry binary cannot tell symmetric from asymmetric flows
+    /// without a SETKEYINFO mode hint, so when this is set we
+    /// conservatively suppress caching entirely for the session.
+    public var noSymkeyCache: Bool = false
+
     public init() {}
 
     /// AS-9: per-OPTION-value cap. Each option text field is bounded
@@ -150,6 +157,9 @@ public struct OptionState: Sendable, Equatable {
 
         case "display":
             displayName = value
+
+        case "no-symkey-cache":
+            noSymkeyCache = true
 
         default:
             // Silently ignore unknown options; matches upstream's tolerance

@@ -301,15 +301,21 @@ final class AssuanLoop {
         let laContext = Authenticator.makeContext(reason: reason)
 
         // 1. Cache lookup, if eligible and not yet tried this session.
+        //    `--no-symkey-cache` suppresses the cache entirely for this
+        //    session (gpg-agent sent it because the operation is a
+        //    symmetric-encryption one and the user opted out of caching).
         if !triedKeychainThisSession,
            case .key(_, let fpr)? = dialog.keyInfo,
            optionState.allowExternalPasswordCache,
+           !optionState.noSymkeyCache,
            prefs.keychainEnabled
         {
             triedKeychainThisSession = true
+            let lookupPolicy = keyPolicies.policy(for: fpr)
             do {
                 if let cached = try keychain.lookup(
                     fingerprint: fpr,
+                    policy: lookupPolicy,
                     context: laContext
                 ) {
                     log.info("returning cached passphrase from keychain")
@@ -348,7 +354,8 @@ final class AssuanLoop {
             // had a keyinfo, and whether the user disabled the cache.
             if savedToKeychain,
                case .key(_, let fpr)? = dialog.keyInfo,
-               prefs.keychainEnabled
+               prefs.keychainEnabled,
+               !optionState.noSymkeyCache
             {
                 // KC-7: do NOT use the parsed user-id as kSecAttrLabel.
                 // The label is visible in Keychain Access metadata
@@ -379,6 +386,8 @@ final class AssuanLoop {
                     why = "user-unchecked-save"
                 } else if dialog.keyInfo == nil {
                     why = "no-keyinfo"
+                } else if optionState.noSymkeyCache {
+                    why = "no-symkey-cache"
                 } else {
                     why = "prefs-disabled"
                 }
