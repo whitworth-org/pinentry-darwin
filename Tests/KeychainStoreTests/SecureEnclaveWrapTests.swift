@@ -148,7 +148,11 @@ final class SecureEnclaveWrapTests: XCTestCase {
 
     @MainActor
     func testUnwrapWithMissingSEKeyThrows() throws {
-        try skipIfNoSE()
+        // Calls SecureEnclaveWrap.wrap which generates a real SE key;
+        // gate on the SE-run env var, not just SE availability, so
+        // developer machines do not silently consume SE key slots when
+        // running the suite without intent.
+        try skipUnlessSERunEnabled()
         let (store, _) = ephemeralStore()
         // Wrap a payload so we have a valid blob, but then forget the
         // SE key so unwrap finds the metadata is gone.

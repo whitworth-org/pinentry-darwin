@@ -219,9 +219,19 @@ public enum SecureEnclaveWrap {
         )
 
         // 5. AES-GCM seal. CryptoKit picks a random 12-byte nonce.
+        //    Bridge the SecureBytes buffer to Data via `bytesNoCopy` with
+        //    a `.none` deallocator so Foundation does not allocate a
+        //    separate (un-mlock'd, un-zeroed) heap copy of the plaintext.
+        //    SecureBytes owns the memory; `pt` is a view only. CryptoKit
+        //    may still copy internally for its own scratch buffer — that
+        //    copy is outside our control and is the residual SL-2 risk.
         let sealed = try passphrase.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> AES.GCM.SealedBox in
             do {
-                let pt = Data(bytes: buf.baseAddress!, count: buf.count)
+                guard let base = buf.baseAddress else {
+                    return try AES.GCM.seal(Data(), using: aesKey)
+                }
+                let mutable = UnsafeMutableRawPointer(mutating: UnsafeRawPointer(base))
+                let pt = Data(bytesNoCopy: mutable, count: buf.count, deallocator: .none)
                 return try AES.GCM.seal(pt, using: aesKey)
             } catch {
                 throw SecureEnclaveWrapError.sealedBoxFailed(String(describing: error))
@@ -363,6 +373,16 @@ public enum SecureEnclaveWrap {
     /// Load the existing SE key for `fingerprint`, or generate + persist
     /// a new one. Generation itself does NOT prompt for biometry —
     /// the SecAccessControl gate fires only on use.
+    ///
+    /// CONCURRENCY: load-check-generate-store is not atomic. Two concurrent
+    /// `wrap` calls for the same fingerprint can both observe a missing
+    /// rep, both generate fresh SE keys, and have one silently overwrite
+    /// the other in UserDefaults — orphaning the first SE key and making
+    /// the first wrap blob undecryptable. This is acceptable because
+    /// gpg-agent drives pinentry from a serial Assuan loop (one operation
+    /// at a time per pinentry process), and Settings UI writes are
+    /// serialized on the main actor. Callers that drive concurrent wraps
+    /// for the same fingerprint MUST serialize externally.
     private static func loadOrGenerateWrapKey(
         fingerprint: String,
         policy: KeyPolicy,
