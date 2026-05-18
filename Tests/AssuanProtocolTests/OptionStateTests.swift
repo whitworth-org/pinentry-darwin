@@ -123,14 +123,36 @@ final class OptionStateTests: XCTestCase {
         XCTAssertTrue(s.noSymkeyCache)
     }
 
-    func testNoSymkeyCacheStickyOnceSet() {
-        // OPTION is a one-way latch in upstream pinentry — once
-        // gpg-agent says "no caching", it stays off for the session
-        // regardless of further OPTION traffic.
+    func testNoSymkeyCacheStickyAcrossOtherOptions() {
+        // Once set, no-symkey-cache is not cleared by subsequent OPTION
+        // traffic for unrelated keys. Only RESET clears it.
         var s = OptionState()
         s.apply(key: "no-symkey-cache", value: nil)
         s.apply(key: "ttyname", value: "/dev/ttys001")
         s.apply(key: "default-ok", value: "OK")
         XCTAssertTrue(s.noSymkeyCache)
+    }
+
+    func testResetPerOperationClearsNoSymkeyCache() {
+        // RESET marks an operation boundary. no-symkey-cache is a
+        // per-operation hint and must not bleed across operations.
+        var s = OptionState()
+        s.apply(key: "no-symkey-cache", value: nil)
+        XCTAssertTrue(s.noSymkeyCache)
+        s.resetPerOperation()
+        XCTAssertFalse(s.noSymkeyCache)
+    }
+
+    func testResetPerOperationPreservesSessionState() {
+        // Session-level negotiation (ttyname, lc-ctype, default labels)
+        // must survive RESET — gpg-agent does not re-issue them.
+        var s = OptionState()
+        s.apply(key: "ttyname", value: "/dev/ttys001")
+        s.apply(key: "lc-ctype", value: "en_US.UTF-8")
+        s.apply(key: "default-ok", value: "OK")
+        s.resetPerOperation()
+        XCTAssertEqual(s.ttyName, "/dev/ttys001")
+        XCTAssertEqual(s.lcCType, "en_US.UTF-8")
+        XCTAssertEqual(s.defaultOK, "OK")
     }
 }

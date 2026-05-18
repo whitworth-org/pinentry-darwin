@@ -192,6 +192,7 @@ final class AssuanLoop {
 
             case .reset:
                 dialog.resetAll()
+                optionState.resetPerOperation()
                 triedKeychainThisSession = false
                 await reply(.ok)
 

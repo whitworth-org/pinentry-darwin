@@ -672,9 +672,13 @@ public struct KeychainStore: Sendable {
         guard let ttl = policy.cacheTTLSeconds, ttl > 0 else { return nil }
         guard let created = creationDate else { return false }
         let age = Date().timeIntervalSince(created)
-        guard age > TimeInterval(ttl) else { return false }
+        guard age >= TimeInterval(ttl) else { return false }
         keychainLogger.info("cache TTL expired (age=\(Int(age), privacy: .public)s ttl=\(ttl, privacy: .public)s); dropping entry")
-        try? clear(fingerprint: fingerprint)
+        do {
+            try clear(fingerprint: fingerprint)
+        } catch {
+            keychainLogger.error("TTL eviction delete failed: \(String(describing: error), privacy: .public)")
+        }
         return true
     }
 

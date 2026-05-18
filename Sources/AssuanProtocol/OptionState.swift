@@ -53,6 +53,18 @@ public struct OptionState: Sendable, Equatable {
 
     public init() {}
 
+    /// Reset per-operation OPTION flags. RESET in the Assuan protocol
+    /// clears per-operation state but preserves session-level negotiation
+    /// (ttyname, lc-ctype, default-* labels, etc.). `no-symkey-cache` is
+    /// a per-operation hint from gpg-agent: a symmetric op may set it,
+    /// the next operation (potentially asymmetric) should start fresh
+    /// rather than inheriting the suppression. Upstream gpg-agent
+    /// re-issues the OPTION on every askpin when --no-symkey-cache is
+    /// in effect, so clearing here does not break that flow.
+    public mutating func resetPerOperation() {
+        noSymkeyCache = false
+    }
+
     /// AS-9: per-OPTION-value cap. Each option text field is bounded
     /// to 1024 bytes to prevent a hostile peer from steadily inflating
     /// session-lifetime memory by re-issuing OPTION with ever-longer
