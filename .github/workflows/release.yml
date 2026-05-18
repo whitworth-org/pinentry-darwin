@@ -87,15 +87,35 @@ jobs:
           gpg --batch --import-ownertrust <<'EOF'
           1EA93FE7B6638F3C6B6E9C5C2ABD2764D9D7175C:6:
           EOF
+          # Force trustdb recomputation and on-disk commit so the next
+          # gpg invocation does not race against an in-flight trust
+          # recalculation. Observed on macos-15 runners during the
+          # v1.1.0 release: ownertrust import returned before trustdb
+          # was settled, the following `git tag -v` exited non-zero
+          # under pipefail even though the signature was good and trust
+          # was ultimate, causing a spurious "not signed by trusted
+          # key" failure that cleared on rerun.
+          gpg --batch --check-trustdb
 
       - name: Verify tag signature
+        env:
+          MAINTAINER_FPR: 1EA93FE7B6638F3C6B6E9C5C2ABD2764D9D7175C
         run: |
           set -euo pipefail
-          if ! git tag -v "$GITHUB_REF_NAME" 2>&1 | grep -q "Good signature"; then
+          # Capture combined output without letting gpg's exit code
+          # collapse the pipeline. gpg can exit non-zero on `tag -v`
+          # for trust-class warnings even when the signature is good
+          # and the key is ultimately trusted via ownertrust above.
+          # Authority is the textual presence of "Good signature" AND
+          # the maintainer fingerprint — both must appear.
+          verify_output="$(git tag -v "$GITHUB_REF_NAME" 2>&1 || true)"
+          if ! grep -q "Good signature" <<<"$verify_output" \
+             || ! grep -qF "$MAINTAINER_FPR" <<<"$verify_output"; then
             echo "::error::Tag $GITHUB_REF_NAME is not signed by a trusted key" >&2
-            git tag -v "$GITHUB_REF_NAME" 2>&1 | sed 's/^/  /'
+            awk '{print "  " $0}' <<<"$verify_output" >&2
             exit 1
           fi
+          echo "Tag $GITHUB_REF_NAME verified against $MAINTAINER_FPR"
 
       - name: Verify Info.plist version matches tag
         run: |
