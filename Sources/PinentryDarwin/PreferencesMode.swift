@@ -99,6 +99,14 @@ private final class PreferencesAppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Per-key Forget action — deletes the keychain entry for one
+        // fingerprint. Runs off the main actor so SecItemDelete (which
+        // can prompt for biometric unlock) does not block the UI run loop.
+        let forget: @Sendable (String) async -> Void = { fpr in
+            let keychain = KeychainStore()
+            try? keychain.clear(fingerprint: fpr)
+        }
+
         // KeychainStore does not currently expose a clearAll method; for
         // v1.0.0 we leave this nil and the SettingsRootView shows
         // "Coming soon" UI.
@@ -106,6 +114,7 @@ private final class PreferencesAppDelegate: NSObject, NSApplicationDelegate {
             uiSettings: initial,
             keychainPrefs: UserPrefs(),
             clearAllPassphrases: nil,
+            forgetPassphrase: forget,
             saveUI: saveUI
         )
 

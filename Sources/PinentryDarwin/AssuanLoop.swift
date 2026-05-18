@@ -20,6 +20,7 @@
 //     text. Wire response is a generic ERR.
 
 import Foundation
+import LocalAuthentication
 import os
 import AppKit
 import AssuanProtocol
@@ -115,6 +116,7 @@ final class AssuanLoop {
     private let coordinator: PinentryCoordinator
     private let keychain: KeychainStore
     private let prefs: UserPrefs
+    private let keyPolicies: KeyPolicyStore
 
     /// Latest accumulated OPTION state.
     private var optionState = OptionState()
@@ -139,12 +141,14 @@ final class AssuanLoop {
         session: Session,
         coordinator: PinentryCoordinator,
         keychain: KeychainStore,
-        prefs: UserPrefs
+        prefs: UserPrefs,
+        keyPolicies: KeyPolicyStore = KeyPolicyStore()
     ) {
         self.session = session
         self.coordinator = coordinator
         self.keychain = keychain
         self.prefs = prefs
+        self.keyPolicies = keyPolicies
     }
 
     // MARK: Run
@@ -287,6 +291,15 @@ final class AssuanLoop {
     // MARK: GETPIN
 
     private func handleGetPin() async {
+        // Build an LAContext for this request. The sanitized SETDESC
+        // becomes the Touch ID sheet's `localizedReason` so the user can
+        // confirm the prompt is for THEIR GPG key (anti-phishing).
+        // Reused across the cache lookup and any future SE unwrap within
+        // touchIDAuthenticationAllowableReuseDuration.
+        Authenticator.logCapabilityOnce()
+        let reason = Authenticator.sanitize(dialog.description)
+        let laContext = Authenticator.makeContext(reason: reason)
+
         // 1. Cache lookup, if eligible and not yet tried this session.
         if !triedKeychainThisSession,
            case .key(_, let fpr)? = dialog.keyInfo,
@@ -295,7 +308,10 @@ final class AssuanLoop {
         {
             triedKeychainThisSession = true
             do {
-                if let cached = try keychain.lookup(fingerprint: fpr) {
+                if let cached = try keychain.lookup(
+                    fingerprint: fpr,
+                    context: laContext
+                ) {
                     log.info("returning cached passphrase from keychain")
                     await reply(.status(keyword: "PASSWORD_FROM_CACHE",
                                         parameters: ""))
@@ -342,10 +358,12 @@ final class AssuanLoop {
                 // user-id can still be derived offline by anyone who
                 // already has the fingerprint.
                 let label = "GnuPG passphrase (\(fpr.prefix(16)))"
+                let policy = keyPolicies.policy(for: fpr)
                 do {
                     try keychain.store(fingerprint: fpr,
                                        label: label,
-                                       passphrase: secure)
+                                       passphrase: secure,
+                                       policy: policy)
                     log.info("keychain store ok; fingerprint=\(fpr, privacy: .private)")
                 } catch let kse as KeychainStoreError {
                     log.error("keychain store failed: \(Self.describe(kse), privacy: .public); passphrase not cached")
@@ -534,6 +552,12 @@ final class AssuanLoop {
         } catch {
             log.error("keychain clear failed for clearpassphrase")
         }
+        // Drop any per-key policy override too: a CLEARPASSPHRASE means
+        // the user no longer wants the cached entry, so the override
+        // becomes meaningless and would silently apply if they later
+        // re-cache from a different host (e.g. policy=biometryCurrentSet
+        // resurrected on a re-enroll).
+        keyPolicies.removeOverride(for: fpr)
     }
 
     // MARK: Spec builders

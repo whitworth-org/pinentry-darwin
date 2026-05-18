@@ -50,6 +50,7 @@
 // stay on the legacy path without hitting errSecMissingEntitlement.
 
 import Foundation
+import LocalAuthentication
 import Security
 import SecureMemory
 import os
@@ -150,7 +151,18 @@ public struct KeychainStore: Sendable {
     /// When `useDataProtectionKeychain` is true and a hit comes from the
     /// legacy backend, migrates the entry to data-protection (re-store +
     /// legacy delete) before returning. Migration is best-effort.
-    public func lookup(fingerprint: String) throws -> SecureBytes? {
+    ///
+    /// `context`: optional pre-configured `LAContext` carrying a
+    /// `SETDESC`-derived `localizedReason`. When non-nil it is passed as
+    /// `kSecUseAuthenticationContext` so the Touch ID sheet displays the
+    /// caller-supplied reason instead of the system default. Reusing the
+    /// same context across multiple Sec* calls within
+    /// `touchIDAuthenticationAllowableReuseDuration` (10 s) avoids a
+    /// second prompt for follow-up SE ECDH operations in Tier 3.
+    public func lookup(
+        fingerprint: String,
+        context: LAContext? = nil
+    ) throws -> SecureBytes? {
         // 1. Try the configured primary backend. If the data-protection
         //    keychain rejects with errSecMissingEntitlement (ad-hoc dev
         //    build), record the degraded posture (FV-1) and probe the
@@ -158,7 +170,8 @@ public struct KeychainStore: Sendable {
         do {
             if let bytes = try rawLookup(
                 fingerprint: fingerprint,
-                dataProtection: useDataProtectionKeychain
+                dataProtection: useDataProtectionKeychain,
+                context: context
             ) {
                 return bytes
             }
@@ -173,7 +186,11 @@ public struct KeychainStore: Sendable {
             // continue to use the cached passphrase even on an ad-hoc
             // build, while the UI's degraded-posture badge tells them
             // why "Save in Keychain" is unavailable for new entries.
-            return try rawLookup(fingerprint: fingerprint, dataProtection: false)
+            return try rawLookup(
+                fingerprint: fingerprint,
+                dataProtection: false,
+                context: nil
+            )
         }
         // 2. Migration: when primary is data-protection, also probe legacy
         //    (which is where pinentry-mac writes and where pre-H1 pinentry-
@@ -192,7 +209,8 @@ public struct KeychainStore: Sendable {
         if useDataProtectionKeychain,
            let legacyBytes = try? rawLookup(
                fingerprint: fingerprint,
-               dataProtection: false
+               dataProtection: false,
+               context: nil
            )
         {
             do {
@@ -202,7 +220,8 @@ public struct KeychainStore: Sendable {
                         fingerprint: fingerprint,
                         label: nil,
                         passphrase: secure,
-                        dataProtection: true
+                        dataProtection: true,
+                        policy: defaultPolicy
                     )
                 }
                 // Only delete the legacy entry if the data-protection write
@@ -229,6 +248,11 @@ public struct KeychainStore: Sendable {
     /// If `label` is nil the service name ("GnuPG") is used (matches
     /// KeychainSupport.m:46-47).
     ///
+    /// `policy` chooses the ACL strictness applied via
+    /// `SecAccessControlCreateWithFlags`. Pass nil to inherit
+    /// `KeychainStore.defaultPolicy` (`.userPresence` +
+    /// `whenUnlockedThisDeviceOnly`, matching legacy behaviour).
+    ///
     /// Throws `KeychainStoreError.degradedNoEntitlement` when the
     /// data-protection backend rejects with `errSecMissingEntitlement`
     /// (ad-hoc-signed binary). The store DOES NOT silently fall back to
@@ -236,15 +260,22 @@ public struct KeychainStore: Sendable {
     public func store(
         fingerprint: String,
         label: String?,
-        passphrase: SecureBytes
+        passphrase: SecureBytes,
+        policy: KeyPolicy? = nil
     ) throws {
         try rawStore(
             fingerprint: fingerprint,
             label: label,
             passphrase: passphrase,
-            dataProtection: useDataProtectionKeychain
+            dataProtection: useDataProtectionKeychain,
+            policy: policy ?? defaultPolicy
         )
     }
+
+    /// Policy applied when the caller does not provide one. Always the
+    /// legacy default so callers that have not adopted the policy API
+    /// see byte-identical keychain entries to the pre-Tier-2 build.
+    public var defaultPolicy: KeyPolicy { .legacyDefault }
 
     // MARK: Clear
 
@@ -285,13 +316,18 @@ public struct KeychainStore: Sendable {
     /// fresh user presence (KC-1). The access constant baked into the
     /// access-control object replaces the standalone kSecAttrAccessible —
     /// they cannot both be set. Returns nil if not requested.
-    private func makeAccessControl() throws -> SecAccessControl? {
+    ///
+    /// `policy` selects the biometry / accessibility combination. The
+    /// store-wide `requireUserPresence` flag remains the master switch:
+    /// false disables the ACL entirely (test path), true honours the
+    /// per-call policy.
+    private func makeAccessControl(policy: KeyPolicy) throws -> SecAccessControl? {
         guard requireUserPresence else { return nil }
         var error: Unmanaged<CFError>?
         guard let control = SecAccessControlCreateWithFlags(
             kCFAllocatorDefault,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            [.userPresence],
+            policy.secAccessibility,
+            policy.secAccessControlFlags,
             &error
         ) else {
             let detail = error.map { String(describing: $0.takeRetainedValue()) }
@@ -309,7 +345,8 @@ public struct KeychainStore: Sendable {
         label: String,
         data: CFData,
         dataProtection: Bool,
-        accessControl: SecAccessControl?
+        accessControl: SecAccessControl?,
+        policy: KeyPolicy
     ) -> [String: Any] {
         var attrs: [String: Any] = [
             kSecAttrLabel as String:          label,
@@ -323,14 +360,15 @@ public struct KeychainStore: Sendable {
             // AccessControl bakes in the accessibility constant.
             attrs[kSecAttrAccessControl as String] = accessControl
         } else {
-            attrs[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            attrs[kSecAttrAccessible as String] = policy.secAccessibility
         }
         return attrs
     }
 
     private func rawLookup(
         fingerprint: String,
-        dataProtection: Bool
+        dataProtection: Bool,
+        context: LAContext?
     ) throws -> SecureBytes? {
         var query = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
         query[kSecReturnData as String] = kCFBooleanTrue as Any
@@ -341,11 +379,19 @@ public struct KeychainStore: Sendable {
         // cache. We allow that prompt by not setting kSecUseAuthenticationUI
         // at all (the default is kSecUseAuthenticationUIAllow).
         //
+        // When the caller supplies an `LAContext` we hand it in via
+        // `kSecUseAuthenticationContext` so the Touch ID sheet displays
+        // the SETDESC-derived `localizedReason` instead of the system
+        // default. The system still owns the sheet; we only customize
+        // its reason text.
+        //
         // For the legacy migration probe, we DO request UISkip — the legacy
         // ACL prompt is the deadlock the original code path comment warned
         // about, and migration is opportunistic anyway.
         if !dataProtection {
             query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        } else if let context {
+            query[kSecUseAuthenticationContext as String] = context
         }
 
         var status = OSStatus(errSecSuccess)
@@ -414,15 +460,25 @@ public struct KeychainStore: Sendable {
         fingerprint: String,
         label: String?,
         passphrase: SecureBytes,
-        dataProtection: Bool
+        dataProtection: Bool,
+        policy: KeyPolicy
     ) throws {
         let resolvedLabel = label ?? service
 
         // First check whether an entry already exists. We do not request
         // kSecReturnData here, only existence — that avoids the auth prompt
         // when we are about to overwrite.
-        let probe = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+        var probe = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
             .merging([kSecMatchLimit as String: kSecMatchLimitOne]) { _, new in new }
+        // Suppress the auth UI on the existence probe. With a
+        // `.userPresence` ACL on the existing entry, SecItemCopyMatching
+        // would otherwise prompt for Touch ID even though we are about
+        // to overwrite the value — a redundant prompt on every store.
+        // UISkip falls back to errSecInteractionNotAllowed which we
+        // treat as "entry exists" via the existing switch below.
+        if dataProtection {
+            probe[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        }
 
         var probeStatus = OSStatus(errSecSuccess)
         var attempts = 0
@@ -441,7 +497,7 @@ public struct KeychainStore: Sendable {
 
         // KC-1: build the AccessControl up front so any failure reports
         // before we touch the keychain. nil for legacy / opt-out paths.
-        let accessControl = dataProtection ? try makeAccessControl() : nil
+        let accessControl = dataProtection ? try makeAccessControl(policy: policy) : nil
 
         // SL-3: build a CFData around the passphrase bytes WITHOUT copying.
         // CFDataCreateWithBytesNoCopy + kCFAllocatorNull tells CF to use
@@ -467,18 +523,30 @@ public struct KeychainStore: Sendable {
                 throw KeychainStoreError.unexpectedStatus(errSecAllocate)
             }
 
-            if probeStatus == errSecSuccess {
-                // Update existing.
+            // Use the same probe (sans UISkip) as the identity query for
+            // SecItemUpdate; the update key set must not include
+            // kSecUseAuthenticationUI.
+            let updateQuery = baseQuery(fingerprint: fingerprint, dataProtection: dataProtection)
+                .merging([kSecMatchLimit as String: kSecMatchLimitOne]) { _, new in new }
+
+            // errSecInteractionNotAllowed surfaces when the existence
+            // probe was suppressed (UISkip + ACL-locked entry). The
+            // entry exists from our perspective; route through the
+            // update path. Same for errSecSuccess.
+            let entryExists = probeStatus == errSecSuccess
+                || probeStatus == errSecInteractionNotAllowed
+            if entryExists {
                 let attrs = writeAttributes(
                     label: resolvedLabel,
                     data: cfData,
                     dataProtection: dataProtection,
-                    accessControl: accessControl
+                    accessControl: accessControl,
+                    policy: policy
                 )
                 var status = OSStatus(errSecSuccess)
                 var tries = 0
                 repeat {
-                    status = SecItemUpdate(probe as CFDictionary, attrs as CFDictionary)
+                    status = SecItemUpdate(updateQuery as CFDictionary, attrs as CFDictionary)
                     tries += 1
                 } while status == errSecAuthFailed && tries < 2
                 try translateWriteStatus(status, dataProtection: dataProtection, op: "update")
@@ -489,7 +557,8 @@ public struct KeychainStore: Sendable {
                     label: resolvedLabel,
                     data: cfData,
                     dataProtection: dataProtection,
-                    accessControl: accessControl
+                    accessControl: accessControl,
+                    policy: policy
                 ) {
                     add[k] = v
                 }
