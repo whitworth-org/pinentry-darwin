@@ -11,7 +11,16 @@
 
 import AppKit
 
-/// A small custom NSWindow that hosts pinentry dialogs.
+/// A small custom NSPanel that hosts pinentry dialogs.
+///
+/// Why NSPanel rather than NSWindow: NSPanel is the conventional AppKit
+/// class for short-lived modal prompts. It inherits everything NSWindow
+/// does and adds a few opt-in behaviours we want — `worksWhenModal`
+/// (the panel keeps accepting events even if another application is
+/// running a modal session at the same time) and an explicit non-
+/// default for `becomesKeyOnlyIfNeeded` (false here: we WANT the panel
+/// to become key the moment it's shown, since the whole purpose is
+/// keystroke entry).
 ///
 /// Visual goals:
 /// - Transparent titlebar that matches the underlying NSVisualEffectView.
@@ -19,7 +28,7 @@ import AppKit
 /// - Floats above other apps while modal, but does not steal the dock.
 /// - Tracks the system Light/Dark appearance live (no `appearance` override).
 @MainActor
-public final class PinentryWindow: NSWindow {
+public final class PinentryWindow: NSPanel {
 
     /// Lower bound. Below this the description column gets too narrow
     /// for the smartcard-info multi-line content.
@@ -66,12 +75,12 @@ public final class PinentryWindow: NSWindow {
             defer: false
         )
 
-        // CRITICAL: NSWindow's designated initializer defaults
-        // `isReleasedWhenClosed` to true, which double-frees a Swift-owned
-        // NSWindow under ARC (AppKit autoreleases on close *and* ARC
-        // releases on the last Swift reference dropping). The result is a
-        // use-after-free during the first layout/constraint pass — the
-        // very symptom we hit on GETPIN. Mirror pinentry-mac's
+        // CRITICAL: NSWindow's (and NSPanel's) designated initializer
+        // defaults `isReleasedWhenClosed` to true, which double-frees a
+        // Swift-owned window under ARC (AppKit autoreleases on close
+        // *and* ARC releases on the last Swift reference dropping). The
+        // result is a use-after-free during the first layout/constraint
+        // pass — the very symptom we hit on GETPIN. Mirror pinentry-mac's
         // `releasedWhenClosed="NO"` and let Swift own the lifetime.
         isReleasedWhenClosed = false
 
@@ -105,8 +114,27 @@ public final class PinentryWindow: NSWindow {
         // `.transient` additionally keeps the window out of Spaces /
         // Mission Control entirely; `.ignoresCycle` skips it from
         // Cmd-` window cycling.
+        //
+        // Note: macOS has no public `setContentProtected` API analogous
+        // to iOS's UIWindow.isContentProtected. `sharingType = .none`
+        // is the comprehensive public hardening on macOS — it blocks
+        // ScreenCaptureKit consumers (incl. third-party recorders and
+        // `screencapture`), Mission Control snapshots, Cmd-Tab and
+        // Dock previews, Stage Manager thumbnails, and the share-sheet
+        // window picker. There is no additional notarization-safe API
+        // to layer on top.
         sharingType = .none
         collectionBehavior = [.transient, .ignoresCycle]
+
+        // NSPanel-specific behaviours (no-ops on plain NSWindow):
+        //   becomesKeyOnlyIfNeeded = false → the panel takes key status
+        //     the moment it appears, so the secure field receives the
+        //     first keystroke without an intervening click.
+        //   worksWhenModal = true → the panel keeps accepting events
+        //     even if a sibling NSApp modal session is active, e.g. an
+        //     authorization sheet posted by another component.
+        becomesKeyOnlyIfNeeded = false
+        worksWhenModal = true
 
         // Do NOT set `appearance` — leaving it nil makes the window
         // inherit `NSApp.effectiveAppearance` so System / Light / Dark

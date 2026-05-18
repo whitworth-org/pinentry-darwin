@@ -47,6 +47,39 @@ final class PinentryWindowTests: XCTestCase {
                       "collectionBehavior must include .ignoresCycle")
     }
 
+    // NSPanel migration: PinentryWindow is now an NSPanel subclass for
+    // its modal-friendly behaviours. The previous NSWindow base would
+    // not surface `worksWhenModal` or `becomesKeyOnlyIfNeeded` in a
+    // semantically meaningful way.
+    func testIsNSPanelSubclass() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        XCTAssertTrue(win is NSPanel,
+                      "PinentryWindow must be an NSPanel for modal-tolerant behaviour")
+    }
+
+    // becomesKeyOnlyIfNeeded = false ensures the panel takes key status
+    // the moment it appears so the secure field receives the first
+    // keystroke without an intervening mouse click. The NSPanel default
+    // depends on style mask and can be true under some configurations;
+    // we pin it false explicitly.
+    func testBecomesKeyOnlyIfNeededIsFalse() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        XCTAssertFalse(win.becomesKeyOnlyIfNeeded,
+                       "panel must grab key status immediately for first-keystroke entry")
+    }
+
+    func testWorksWhenModalIsTrue() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        XCTAssertTrue(win.worksWhenModal,
+                      "panel must keep accepting events during sibling modal sessions")
+    }
+
+    func testFloatingLevel() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        XCTAssertEqual(win.level, .floating,
+                       "pinentry must float above full-screen apps and terminals")
+    }
+
     func testCloseButtonInterceptedWhenHandlerSet() {
         let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
         var fired = 0
