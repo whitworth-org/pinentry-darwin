@@ -44,7 +44,26 @@ public struct OptionState: Sendable, Equatable {
     public var touchFile: String?
     public var displayName: String?
 
+    /// `--no-symkey-cache` (Assuan OPTION). Set when gpg-agent tells us
+    /// not to cache the passphrase for symmetric-encryption operations.
+    /// The pinentry binary cannot tell symmetric from asymmetric flows
+    /// without a SETKEYINFO mode hint, so when this is set we
+    /// conservatively suppress caching entirely for the session.
+    public var noSymkeyCache: Bool = false
+
     public init() {}
+
+    /// Reset per-operation OPTION flags. RESET in the Assuan protocol
+    /// clears per-operation state but preserves session-level negotiation
+    /// (ttyname, lc-ctype, default-* labels, etc.). `no-symkey-cache` is
+    /// a per-operation hint from gpg-agent: a symmetric op may set it,
+    /// the next operation (potentially asymmetric) should start fresh
+    /// rather than inheriting the suppression. Upstream gpg-agent
+    /// re-issues the OPTION on every askpin when --no-symkey-cache is
+    /// in effect, so clearing here does not break that flow.
+    public mutating func resetPerOperation() {
+        noSymkeyCache = false
+    }
 
     /// AS-9: per-OPTION-value cap. Each option text field is bounded
     /// to 1024 bytes to prevent a hostile peer from steadily inflating
@@ -150,6 +169,9 @@ public struct OptionState: Sendable, Equatable {
 
         case "display":
             displayName = value
+
+        case "no-symkey-cache":
+            noSymkeyCache = true
 
         default:
             // Silently ignore unknown options; matches upstream's tolerance
