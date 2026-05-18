@@ -130,14 +130,34 @@ public struct KeychainStore: Sendable {
     /// hardware; the default is the secure choice.
     private let requireUserPresence: Bool
 
+    /// When true (default in production), passphrase bytes are wrapped
+    /// under a per-fingerprint Secure Enclave key before being written
+    /// to `kSecValueData`. Lookup peeks the version byte and unwraps
+    /// transparently. Pre-T2 Intel Macs lack an SE; `SecureEnclaveWrap.
+    /// isAvailable` is the runtime gate that turns wrapping into a no-op
+    /// in that case (the entry still gets the `.userPresence` ACL).
+    ///
+    /// Tests pass `false` to keep round-trips deterministic and avoid
+    /// needing biometric hardware for unit tests.
+    private let useSecureEnclaveWrap: Bool
+
+    /// Backing store for the per-fingerprint SE key
+    /// `dataRepresentation`. Injectable so tests can use an ephemeral
+    /// UserDefaults suite.
+    private let seWrapStore: SEWrapKeyStore
+
     public init(
         service: String = "GnuPG",
         useDataProtectionKeychain: Bool = true,
-        requireUserPresence: Bool = true
+        requireUserPresence: Bool = true,
+        useSecureEnclaveWrap: Bool = true,
+        seWrapStore: SEWrapKeyStore = SEWrapKeyStore()
     ) {
         self.service = service
         self.useDataProtectionKeychain = useDataProtectionKeychain
         self.requireUserPresence = requireUserPresence
+        self.useSecureEnclaveWrap = useSecureEnclaveWrap
+        self.seWrapStore = seWrapStore
     }
 
     // MARK: Lookup
@@ -173,7 +193,11 @@ public struct KeychainStore: Sendable {
                 dataProtection: useDataProtectionKeychain,
                 context: context
             ) {
-                return bytes
+                return try unwrapIfNeeded(
+                    bytes: bytes,
+                    fingerprint: fingerprint,
+                    context: context
+                )
             }
         } catch KeychainStoreError.unexpectedStatus(let s)
             where s == errSecMissingEntitlement && useDataProtectionKeychain
@@ -186,11 +210,18 @@ public struct KeychainStore: Sendable {
             // continue to use the cached passphrase even on an ad-hoc
             // build, while the UI's degraded-posture badge tells them
             // why "Save in Keychain" is unavailable for new entries.
-            return try rawLookup(
+            if let bytes = try rawLookup(
                 fingerprint: fingerprint,
                 dataProtection: false,
                 context: nil
-            )
+            ) {
+                return try unwrapIfNeeded(
+                    bytes: bytes,
+                    fingerprint: fingerprint,
+                    context: context
+                )
+            }
+            return nil
         }
         // 2. Migration: when primary is data-protection, also probe legacy
         //    (which is where pinentry-mac writes and where pre-H1 pinentry-
@@ -216,11 +247,10 @@ public struct KeychainStore: Sendable {
             do {
                 try legacyBytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
                     let secure = SecureBytes(copying: buf)
-                    try rawStore(
+                    try store(
                         fingerprint: fingerprint,
                         label: nil,
                         passphrase: secure,
-                        dataProtection: true,
                         policy: defaultPolicy
                     )
                 }
@@ -238,6 +268,63 @@ public struct KeychainStore: Sendable {
             return legacyBytes
         }
         return nil
+    }
+
+    /// Inspect the version byte / X9.63 marker on a freshly-read keychain
+    /// payload. Wrapped → unwrap via SE. Otherwise → return as-is
+    /// (legacy pinentry-mac / pre-Tier-3 entry; left intact until the
+    /// next store cycle re-wraps).
+    ///
+    /// Returns nil when a wrapped blob is unusable (auth failed, SE key
+    /// missing, layout malformed, version unsupported). The caller
+    /// treats nil as a cache miss so the next GETPIN re-prompts.
+    private func unwrapIfNeeded(
+        bytes: SecureBytes,
+        fingerprint: String,
+        context: LAContext?
+    ) throws -> SecureBytes? {
+        // No SE configured or available → never attempt to unwrap.
+        // The bytes are either a legacy unwrapped passphrase or a
+        // wrapped blob from a previous build with SE that we now have
+        // no way to read. In the latter case we surface as-is; the
+        // gpg-agent will deem it incorrect and re-prompt, after which
+        // the next store overwrites with the new (non-wrapped) layout.
+        guard useSecureEnclaveWrap && SecureEnclaveWrap.isAvailable else {
+            return bytes
+        }
+        let isWrapped: Bool = bytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
+            let asData = Data(bytes: buf.baseAddress!, count: buf.count)
+            return SecureEnclaveWrap.isWrapped(asData)
+        }
+        guard isWrapped else { return bytes }
+
+        // Build a context if the caller did not supply one. Bare default
+        // reason; the AssuanLoop normally supplies a SETDESC-derived
+        // string via the LAContext it threads in.
+        let ctx = context ?? LAContext()
+
+        do {
+            return try bytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> SecureBytes in
+                let blob = Data(bytes: buf.baseAddress!, count: buf.count)
+                return try SecureEnclaveWrap.unwrap(
+                    blob: blob,
+                    fingerprint: fingerprint,
+                    context: ctx,
+                    store: seWrapStore
+                )
+            }
+        } catch SecureEnclaveWrapError.authenticationFailed,
+                SecureEnclaveWrapError.missingWrapKey,
+                SecureEnclaveWrapError.malformedBlob,
+                SecureEnclaveWrapError.unsupportedVersion {
+            // Treat any "this cached blob is unusable" failure as a
+            // cache miss and clean up so the next GETPIN re-prompts.
+            // Best-effort cleanup: failures inside `clear` are
+            // swallowed (idempotent).
+            keychainLogger.error("SE unwrap failed; dropping stale entry")
+            try? clear(fingerprint: fingerprint)
+            return nil
+        }
     }
 
     // MARK: Store
@@ -263,12 +350,44 @@ public struct KeychainStore: Sendable {
         passphrase: SecureBytes,
         policy: KeyPolicy? = nil
     ) throws {
+        let resolvedPolicy = policy ?? defaultPolicy
+        // SE wrap path: wrap the passphrase under the per-fingerprint
+        // Secure Enclave key, then store the resulting blob in the
+        // keychain. On hardware without an SE, fall through to the
+        // legacy unwrapped path (the `.userPresence` ACL is the only
+        // confidentiality boundary in that mode).
+        if useSecureEnclaveWrap && SecureEnclaveWrap.isAvailable {
+            do {
+                let wrapped = try SecureEnclaveWrap.wrap(
+                    passphrase: passphrase,
+                    fingerprint: fingerprint,
+                    policy: resolvedPolicy,
+                    store: seWrapStore
+                )
+                let wrappedSecure = wrapped.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> SecureBytes in
+                    let typed = raw.bindMemory(to: UInt8.self)
+                    return SecureBytes(copying: typed)
+                }
+                try rawStore(
+                    fingerprint: fingerprint,
+                    label: label,
+                    passphrase: wrappedSecure,
+                    dataProtection: useDataProtectionKeychain,
+                    policy: resolvedPolicy
+                )
+                return
+            } catch SecureEnclaveWrapError.enclaveUnavailable {
+                // Race: isAvailable returned true but generation failed.
+                // Fall through to legacy storage.
+                keychainLogger.error("SE wrap unavailable at write; storing unwrapped")
+            }
+        }
         try rawStore(
             fingerprint: fingerprint,
             label: label,
             passphrase: passphrase,
             dataProtection: useDataProtectionKeychain,
-            policy: policy ?? defaultPolicy
+            policy: resolvedPolicy
         )
     }
 
@@ -290,6 +409,10 @@ public struct KeychainStore: Sendable {
         if useDataProtectionKeychain {
             try? rawClear(fingerprint: fingerprint, dataProtection: false)
         }
+        // Always drop the per-fingerprint SE wrap key on clear so a
+        // re-cache generates a fresh key. Idempotent; safe to call
+        // when no SE key exists.
+        SecureEnclaveWrap.deleteWrapKey(fingerprint: fingerprint, store: seWrapStore)
     }
 
     // MARK: - Internal raw operations (one specific backend per call)
