@@ -177,6 +177,11 @@ public enum SecureEnclaveWrap {
     ) throws -> Data {
         guard isAvailable else { throw SecureEnclaveWrapError.enclaveUnavailable }
 
+        // SecureBytes inits precondition-fail on zero-capacity input, so
+        // `passphrase.withUnsafeBytes` here is guaranteed to receive a
+        // non-nil base and a positive count. The seal-step force-unwrap
+        // is safe under that invariant.
+
         // 1. Load or generate the SE key.
         let seKey = try loadOrGenerateWrapKey(
             fingerprint: fingerprint,
@@ -226,10 +231,9 @@ public enum SecureEnclaveWrap {
         //    may still copy internally for its own scratch buffer — that
         //    copy is outside our control and is the residual SL-2 risk.
         let sealed = try passphrase.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> AES.GCM.SealedBox in
+            // step-0 above guarantees baseAddress non-nil and count > 0.
+            let base = buf.baseAddress!
             do {
-                guard let base = buf.baseAddress else {
-                    return try AES.GCM.seal(Data(), using: aesKey)
-                }
                 let mutable = UnsafeMutableRawPointer(mutating: UnsafeRawPointer(base))
                 let pt = Data(bytesNoCopy: mutable, count: buf.count, deallocator: .none)
                 return try AES.GCM.seal(pt, using: aesKey)
@@ -338,7 +342,7 @@ public enum SecureEnclaveWrap {
             throw SecureEnclaveWrapError.malformedBlob
         }
 
-        let plaintext: Data
+        var plaintext: Data
         do {
             plaintext = try AES.GCM.open(sealed, using: aesKey)
         } catch {
@@ -346,10 +350,21 @@ public enum SecureEnclaveWrap {
             throw SecureEnclaveWrapError.authenticationFailed
         }
 
-        // 6. Copy into SecureBytes and best-effort wipe the intermediate
-        //    Data. Swift Data has no public wipe API and the buffer is
-        //    refcounted by Foundation; this is the standard pragmatic
-        //    overwrite (which at minimum reduces the residency window).
+        // 6. Copy into SecureBytes and wipe the intermediate Data. The
+        //    plaintext buffer Foundation hands us is not mlock'd and is
+        //    not zeroed on dealloc; explicitly overwrite it with
+        //    memset_s (volatile-safe) before returning so the plaintext
+        //    residency window is bounded to this scope. CryptoKit may
+        //    have made additional internal copies before returning — that
+        //    is the documented residual SL-2 risk and matches the
+        //    encrypt-side acceptance.
+        defer {
+            plaintext.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+                if let base = raw.baseAddress, raw.count > 0 {
+                    _ = memset_s(base, raw.count, 0, raw.count)
+                }
+            }
+        }
         let secure = plaintext.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> SecureBytes in
             let typed = raw.bindMemory(to: UInt8.self)
             return SecureBytes(copying: typed)
