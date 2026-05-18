@@ -16,6 +16,11 @@ public struct SettingsRootView: View {
     /// executable (KeychainStore.clearAll). nil shows "Coming soon".
     private let clearAllPassphrases: (@Sendable () async -> Void)?
 
+    /// Optional closure to forget a single stored passphrase by
+    /// fingerprint. Wired up by the executable (KeychainStore.clear).
+    /// nil disables the per-row Forget button in PerKeyPolicyView.
+    private let forgetPassphrase: (@Sendable (String) async -> Void)?
+
     /// Optional persistence hook. The executable typically passes a
     /// closure that calls `await UISettingsStore().save(_:)`.
     private let saveUI: (@Sendable (UISettings) -> Void)?
@@ -24,11 +29,13 @@ public struct SettingsRootView: View {
         uiSettings: UISettings = UISettings(),
         keychainPrefs: UserPrefs = UserPrefs(),
         clearAllPassphrases: (@Sendable () async -> Void)? = nil,
+        forgetPassphrase: (@Sendable (String) async -> Void)? = nil,
         saveUI: (@Sendable (UISettings) -> Void)? = nil
     ) {
         self._uiSettings = State(initialValue: uiSettings)
         self._keychainPrefs = State(initialValue: keychainPrefs)
         self.clearAllPassphrases = clearAllPassphrases
+        self.forgetPassphrase = forgetPassphrase
         self.saveUI = saveUI
     }
 
@@ -46,6 +53,9 @@ public struct SettingsRootView: View {
                 clearAll: clearAllPassphrases
             )
             .tabItem { Label("Keychain", systemImage: "key") }
+
+            PerKeyPolicyView(forget: forgetPassphrase)
+                .tabItem { Label("Per-Key", systemImage: "person.badge.key") }
 
             BehaviourSettingsView(
                 settings: $uiSettings,
