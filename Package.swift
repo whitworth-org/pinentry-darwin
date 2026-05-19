@@ -1,4 +1,4 @@
-// swift-tools-version: 6.2
+// swift-tools-version: 6.0
 //
 // pinentry-darwin
 //
@@ -10,15 +10,17 @@
 // HARD RULES (per project CLAUDE.md):
 //   - No third-party dependencies. Standard library + Apple frameworks only.
 //   - Swift 6 language mode, strict concurrency.
-//   - macOS 26.0+ (for the Secure-Enclave-backed SSH SecurityKeyProvider
-//     at /usr/lib/ssh-keychain.dylib).
+//   - SwiftPM compile floor: macOS 15.0+ (matches the toolchain shipped on
+//     GitHub's `macos-26` runner). The Secure-Enclave-backed SSH module is
+//     gated at runtime via `if #available(macOS 26.0, *)`, and the .app's
+//     `LSMinimumSystemVersion` enforces 26.0 at launch.
 
 import PackageDescription
 
 let package = Package(
     name: "pinentry-darwin",
     platforms: [
-        .macOS(.v26)
+        .macOS(.v15)
     ],
     products: [
         .executable(name: "pinentry-darwin", targets: ["PinentryDarwin"]),
