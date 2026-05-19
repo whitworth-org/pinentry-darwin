@@ -96,7 +96,7 @@ public final class SSHIdentityManager: ObservableObject {
 
     // MARK: - Internal helpers
 
-    private func runGuarded<T>(
+    private func runGuarded<T: Sendable>(
         _ work: @Sendable () async throws -> T,
         onSuccess: @MainActor (T) -> Void
     ) async {
