@@ -1,6 +1,6 @@
 # pinentry-darwin
 
-SwiftUI passphrase dialog for `gpg-agent`. Drop-in replacement for `pinentry-mac`: same Assuan protocol, same Keychain layout. macOS 15+, Apple Silicon only.
+SwiftUI passphrase dialog for `gpg-agent`. Drop-in replacement for `pinentry-mac`: same Assuan protocol, same Keychain layout. macOS 26 (Tahoe) or later, Apple Silicon only.
 
 ## Install
 

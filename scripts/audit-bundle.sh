@@ -98,9 +98,9 @@ if [ -f "$INFO_PLIST" ]; then
 
     min_os="$(plutil -extract LSMinimumSystemVersion raw -- "$INFO_PLIST" 2>/dev/null || true)"
     case "$min_os" in
-        15.*|16.*|17.*|18.*|19.*|20.*) ;;  # FV-9: forward-compat through plausible v20
-        '') ;;  # optional; LSMinimumSystemVersion is nice-to-have
-        *) fail "LSMinimumSystemVersion '$min_os' is below macOS 15 (CLAUDE.md requires 15+)" ;;
+        26.*|27.*|28.*|29.*|30.*) ;;  # forward-compat through plausible v30
+        '') fail "LSMinimumSystemVersion missing (require 26.0+ for SE-SSH)" ;;
+        *) fail "LSMinimumSystemVersion '$min_os' is below macOS 26 (require 26.0+ for SE-SSH)" ;;
     esac
 
     # SC-10: forbid any Info.plist key whose presence indicates a
