@@ -31,6 +31,18 @@ Expected: `accepted, source=Notarized Developer ID`, `TeamIdentifier=KHJA84J3YW`
 - Implements the Assuan command set used by `gpg-agent` 2.4+: `GETPIN`, `CONFIRM`, `MESSAGE`, `SETREPEAT`, `SETKEYINFO`, `SETQUALITYBAR`, `SETTIMEOUT`, `OPTION`, `GETINFO`, `CLEARPASSPHRASE`, `RESET`, `BYE`.
 - Not implemented: `SETGENPIN` (passphrase generation), curses TTY fallback, non-English locales.
 
+## Secure-Enclave SSH identities (macOS 26+)
+
+Open Settings (`pinentry-darwin --preferences`) and select the **SSH** tab to manage Secure-Enclave-backed SSH keys. Behind the scenes this drives `sc_auth create-ctk-identity -k p-256-ne -t bio` and `ssh-add -K -S /usr/lib/ssh-keychain.dylib` — the same workflow you would otherwise run by hand. Private key material stays in the Secure Enclave; this app only ever holds public hashes, fingerprints, and labels.
+
+To use the resulting key with `ssh`, add this to your shell profile:
+
+```sh
+export SSH_SK_PROVIDER=/usr/lib/ssh-keychain.dylib
+```
+
+Then `ssh-copy-id <host>` and `ssh <host>` work as usual, with a Touch ID prompt on each connection.
+
 ## Build
 
 ```sh

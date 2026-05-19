@@ -63,6 +63,15 @@ public struct SettingsRootView: View {
             )
             .tabItem { Label("Behaviour", systemImage: "slider.horizontal.3") }
 
+            Group {
+                if #available(macOS 26.0, *) {
+                    SSHIdentitiesView()
+                } else {
+                    SSHIdentitiesUnavailableView()
+                }
+            }
+            .tabItem { Label("SSH", systemImage: "key.horizontal") }
+
             AboutView()
                 .tabItem { Label("About", systemImage: "info.circle") }
         }
