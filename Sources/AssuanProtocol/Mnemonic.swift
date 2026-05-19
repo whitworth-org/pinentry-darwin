@@ -78,4 +78,25 @@ public enum Mnemonic {
     public static func stripOptional(_ s: String?) -> String? {
         s.map(strip)
     }
+
+    /// FV-6 filter for non-mnemonic body text. Drops grapheme clusters that
+    /// contain any bidi-override / zero-width / BOM codepoint. No GTK
+    /// underscore handling, so `_` survives — apply this to SETDESC /
+    /// SETTITLE / SETERROR / SETREPEATERROR payloads where an underscore is
+    /// part of the message, not an accelerator marker.
+    public static func sanitiseBody(_ s: String) -> String {
+        var result = ""
+        result.reserveCapacity(s.count)
+        for c in s where !c.unicodeScalars.contains(where: Self.isBidiOrInvisible) {
+            result.append(c)
+        }
+        return result
+    }
+
+    /// Optional-friendly variant of `sanitiseBody`. Mirrors `stripOptional`
+    /// so AssuanLoop / OptionState call sites that hold String? values
+    /// don't have to unwrap before sanitising.
+    public static func sanitiseBodyOptional(_ s: String?) -> String? {
+        s.map(sanitiseBody)
+    }
 }

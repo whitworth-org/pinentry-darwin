@@ -42,16 +42,35 @@ public struct Authenticator: Sendable {
     /// text into a system UI element.
     public static let maxReasonBytes = 256
 
+    /// FV-6: bidi-override / zero-width / BOM codepoints. Duplicated from
+    /// `AssuanProtocol.Mnemonic.isBidiOrInvisible` (the source of truth)
+    /// because `KeychainStore` does not depend on `AssuanProtocol` — the
+    /// architectural boundary keeps the Keychain layer protocol-agnostic.
+    /// If either copy changes, update both. Tests in MnemonicTests and
+    /// AuthenticatorTests pin the predicate from both sides.
+    @inline(__always)
+    private static func isBidiOrInvisible(_ scalar: Unicode.Scalar) -> Bool {
+        let v = scalar.value
+        return (0x200B...0x200F).contains(v)
+            || (0x202A...0x202E).contains(v)
+            || (0x2060...0x2069).contains(v)
+            || v == 0xFEFF
+    }
+
     /// Sanitize a SETDESC-derived description into a value safe to use as
     /// `LAContext.localizedReason`. Rules:
     ///   - drop C0 control bytes (< 0x20) and DEL (0x7F)
+    ///   - drop FV-6 bidi-override / zero-width / BOM codepoints
     ///   - collapse runs of whitespace to a single space
     ///   - trim leading/trailing whitespace
     ///   - byte-cap at `maxReasonBytes` (graceful unicode-scalar boundary)
     public static func sanitize(_ description: String?) -> String? {
         guard let raw = description, !raw.isEmpty else { return nil }
 
-        // First pass: strip control bytes, normalise whitespace.
+        // First pass: strip control bytes, drop FV-6 codepoints, normalise
+        // whitespace. FV-6 drops outright (no whitespace substitution) —
+        // bidi overrides are not "missing characters", they are formatting
+        // directives and the right thing on the Touch ID sheet is silence.
         var out = String.UnicodeScalarView()
         var prevWasSpace = false
         for scalar in raw.unicodeScalars {
@@ -61,6 +80,9 @@ public struct Authenticator: Sendable {
                     out.append(" ")
                     prevWasSpace = true
                 }
+                continue
+            }
+            if Self.isBidiOrInvisible(scalar) {
                 continue
             }
             if scalar == " " {

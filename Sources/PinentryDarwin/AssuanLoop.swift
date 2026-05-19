@@ -201,16 +201,24 @@ final class AssuanLoop {
                 await reply(.ok)
 
             case .setDesc(let s):
-                dialog.description = s
+                // FV-6: SETDESC text reaches the SwiftUI body in PinView /
+                // ConfirmView / MessageView via Text(verbatim:), and the
+                // Touch ID sheet via Authenticator.sanitize. Strip bidi /
+                // zero-width / BOM codepoints at ingest so the same payload
+                // is consistent across both surfaces.
+                dialog.description = Mnemonic.sanitiseBody(s)
                 await reply(.ok)
             case .setPrompt(let s):
                 dialog.prompt = Mnemonic.strip(s)
                 await reply(.ok)
             case .setTitle(let s):
-                dialog.title = s
+                // FV-6: title renders via Text(verbatim:) on every dialog.
+                dialog.title = Mnemonic.sanitiseBody(s)
                 await reply(.ok)
             case .setError(let s):
-                dialog.error = s
+                // FV-6: error string renders via Text(verbatim:) above the
+                // input field — a prime phishing target.
+                dialog.error = Mnemonic.sanitiseBody(s)
                 await reply(.ok)
             case .setOK(let s):
                 dialog.okLabel = Mnemonic.strip(s)
@@ -238,7 +246,8 @@ final class AssuanLoop {
                 dialog.repeatOK = Mnemonic.strip(s)
                 await reply(.ok)
             case .setRepeatError(let s):
-                dialog.repeatError = s
+                // FV-6: repeat-mismatch error renders via Text(verbatim:).
+                dialog.repeatError = Mnemonic.sanitiseBody(s)
                 await reply(.ok)
 
             case .setTimeout(let n):
