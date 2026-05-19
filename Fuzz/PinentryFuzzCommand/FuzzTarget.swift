@@ -40,6 +40,12 @@ public func fuzzCommandOnce(_ bytes: [UInt8]) {
 
     // And the fingerprint validator — pure-string over arbitrary input.
     _ = Command.isValidFingerprint(cleaned)
+
+    // Mnemonic sanitisers run on attacker-shaped labels and body text.
+    // We look for crashes on adversarial grapheme-cluster shapes and on
+    // BOM-only / surrogate-like inputs, not for specific outputs.
+    _ = Mnemonic.strip(cleaned)
+    _ = Mnemonic.sanitiseBody(cleaned)
 }
 
 @_cdecl("LLVMFuzzerTestOneInput")

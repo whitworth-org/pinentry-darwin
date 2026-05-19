@@ -95,4 +95,99 @@ final class MnemonicTests: XCTestCase {
     func testStripsBOM() {
         XCTAssertEqual(Mnemonic.strip("\u{FEFF}OK"), "OK")
     }
+
+    // MARK: - sanitiseBody
+
+    func testSanitiseBodyEmptyAndPlain() {
+        XCTAssertEqual(Mnemonic.sanitiseBody(""), "")
+        XCTAssertEqual(Mnemonic.sanitiseBody("Please enter the passphrase"),
+                       "Please enter the passphrase")
+    }
+
+    // sanitiseBody is for body text, not button labels — underscores are
+    // legitimate content and must survive (unlike Mnemonic.strip).
+    func testSanitiseBodyKeepsUnderscores() {
+        XCTAssertEqual(Mnemonic.sanitiseBody("_OK"), "_OK")
+        XCTAssertEqual(Mnemonic.sanitiseBody("foo_bar"), "foo_bar")
+    }
+
+    // The security contract: no FV-6 scalar appears in the output,
+    // regardless of how Swift's grapheme segmentation groups the input.
+    // We don't assert "AB → AB" because Swift's clustering binds some
+    // format scalars (ZWJ U+200D, ZWNJ U+200C) to the preceding letter,
+    // and the safer behaviour is to drop the whole cluster — including
+    // the letter. The legitimacy of the letter is undecidable once an
+    // adversarial format codepoint is attached to it.
+    func testSanitiseBodyDropsZeroWidthRange() {
+        // U+200B-U+200F: zero-width space through RLM.
+        for v: UInt32 in 0x200B...0x200F {
+            let scalar = Unicode.Scalar(v)!
+            let out = Mnemonic.sanitiseBody("A" + String(scalar) + "B")
+            XCTAssertFalse(
+                out.unicodeScalars.contains(scalar),
+                "scalar U+\(String(v, radix: 16, uppercase: true)) leaked into '\(out)'"
+            )
+        }
+    }
+
+    func testSanitiseBodyDropsLegacyBidiOverrideRange() {
+        // U+202A-U+202E: LRE / RLE / PDF / LRO / RLO.
+        for v: UInt32 in 0x202A...0x202E {
+            let scalar = Unicode.Scalar(v)!
+            let out = Mnemonic.sanitiseBody("A" + String(scalar) + "B")
+            XCTAssertFalse(
+                out.unicodeScalars.contains(scalar),
+                "scalar U+\(String(v, radix: 16, uppercase: true)) leaked into '\(out)'"
+            )
+        }
+    }
+
+    func testSanitiseBodyDropsBidiIsolateRange() {
+        // U+2060-U+2069: word joiner + bidi isolates.
+        for v: UInt32 in 0x2060...0x2069 {
+            let scalar = Unicode.Scalar(v)!
+            let out = Mnemonic.sanitiseBody("A" + String(scalar) + "B")
+            XCTAssertFalse(
+                out.unicodeScalars.contains(scalar),
+                "scalar U+\(String(v, radix: 16, uppercase: true)) leaked into '\(out)'"
+            )
+        }
+    }
+
+    func testSanitiseBodyDropsBOM() {
+        XCTAssertEqual(Mnemonic.sanitiseBody("\u{FEFF}Hello"), "Hello")
+        XCTAssertEqual(Mnemonic.sanitiseBody("Hel\u{FEFF}lo"), "Hello")
+    }
+
+    // Hostile SETDESC: leading "Unlock 0xAAAA" rewritten via RLO to
+    // visually present a different fingerprint. After sanitiseBody the
+    // RLO is gone and the underlying byte sequence is what gets shown.
+    func testSanitiseBodyNeutralisesHostileSetdesc() {
+        let hostile = "Unlock key \u{202E}AAAA\u{202C} for Alice"
+        XCTAssertEqual(
+            Mnemonic.sanitiseBody(hostile),
+            "Unlock key AAAA for Alice"
+        )
+    }
+
+    // Grapheme-cluster level drop: when an FV-6 scalar shares a cluster
+    // with other scalars (combining marks, adjacent letters under Swift's
+    // segmentation), the whole cluster goes. Output never carries an
+    // orphan combining mark or a "joined" cluster that the attacker
+    // shaped into a misleading composition.
+    func testSanitiseBodyDropsClustersContainingFV6() {
+        let out = Mnemonic.sanitiseBody("A\u{200D}\u{0300}B")
+        XCTAssertFalse(out.unicodeScalars.contains(Unicode.Scalar(0x200D)!))
+        XCTAssertFalse(out.unicodeScalars.contains(Unicode.Scalar(0x0300)!))
+    }
+
+    func testSanitiseBodyOptionalNilFlowsThrough() {
+        let s: String? = nil
+        XCTAssertNil(Mnemonic.sanitiseBodyOptional(s))
+    }
+
+    func testSanitiseBodyOptionalSomeFiltered() {
+        let s: String? = "Hello\u{202E}world"
+        XCTAssertEqual(Mnemonic.sanitiseBodyOptional(s), "Helloworld")
+    }
 }

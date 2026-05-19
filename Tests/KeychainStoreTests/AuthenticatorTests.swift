@@ -55,6 +55,55 @@ final class AuthenticatorTests: XCTestCase {
         XCTAssertLessThanOrEqual(sanitized!.utf8.count, Authenticator.maxReasonBytes)
     }
 
+    // FV-6: sanitize must drop bidi-override / zero-width / BOM codepoints
+    // before they reach `LAContext.localizedReason` on the Touch ID sheet.
+    // Mirrors the same predicate enforced for button labels by
+    // AssuanProtocol.Mnemonic.strip + sanitiseBody.
+    func testStripsZeroWidthRange() {
+        for v: UInt32 in 0x200B...0x200F {
+            let s = "A" + String(Unicode.Scalar(v)!) + "B"
+            XCTAssertEqual(
+                Authenticator.sanitize(s), "AB",
+                "scalar U+\(String(v, radix: 16, uppercase: true)) leaked"
+            )
+        }
+    }
+
+    func testStripsLegacyBidiOverrideRange() {
+        for v: UInt32 in 0x202A...0x202E {
+            let s = "A" + String(Unicode.Scalar(v)!) + "B"
+            XCTAssertEqual(
+                Authenticator.sanitize(s), "AB",
+                "scalar U+\(String(v, radix: 16, uppercase: true)) leaked"
+            )
+        }
+    }
+
+    func testStripsBidiIsolateRange() {
+        for v: UInt32 in 0x2060...0x2069 {
+            let s = "A" + String(Unicode.Scalar(v)!) + "B"
+            XCTAssertEqual(
+                Authenticator.sanitize(s), "AB",
+                "scalar U+\(String(v, radix: 16, uppercase: true)) leaked"
+            )
+        }
+    }
+
+    func testStripsBOM() {
+        XCTAssertEqual(Authenticator.sanitize("\u{FEFF}Hello"), "Hello")
+    }
+
+    // The whole point: a hostile SETDESC that visually presents one key
+    // identifier via RLO ends up displaying the underlying bytes verbatim
+    // on the Touch ID sheet.
+    func testNeutralisesHostileSetdesc() {
+        let hostile = "Unlock key \u{202E}AAAA\u{202C} for Alice"
+        XCTAssertEqual(
+            Authenticator.sanitize(hostile),
+            "Unlock key AAAA for Alice"
+        )
+    }
+
     func testUnicodeRespectsByteCap() {
         // Each emoji = 4 bytes. Make sure we cap on a scalar boundary,
         // never split a multibyte sequence in half.
