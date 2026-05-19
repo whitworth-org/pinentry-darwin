@@ -70,6 +70,11 @@ let package = Package(
             ],
             path: "Sources/PinentryDarwin"
         ),
+        .executableTarget(
+            name: "audit-bundle",
+            dependencies: [],
+            path: "Tools/AuditBundle"
+        ),
         .testTarget(
             name: "SecureMemoryTests",
             dependencies: ["SecureMemory"],
@@ -94,6 +99,16 @@ let package = Package(
             name: "PinentryUITests",
             dependencies: ["PinentryUI", "SecureMemory"],
             path: "Tests/PinentryUITests"
+        ),
+        .testTarget(
+            name: "IntegrationSmokeTests",
+            dependencies: [],
+            path: "Tests/IntegrationSmokeTests"
+        ),
+        .testTarget(
+            name: "AuditBundleTests",
+            dependencies: [],
+            path: "Tests/AuditBundleTests"
         ),
 
         // MARK: - Fuzz harnesses
