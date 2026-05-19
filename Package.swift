@@ -27,6 +27,7 @@ let package = Package(
         .library(name: "SecureMemory", targets: ["SecureMemory"]),
         .library(name: "AssuanProtocol", targets: ["AssuanProtocol"]),
         .library(name: "KeychainStore", targets: ["KeychainStore"]),
+        .library(name: "SSHIdentity", targets: ["SSHIdentity"]),
         .library(name: "PinentryUI", targets: ["PinentryUI"]),
     ],
     dependencies: [],
@@ -44,6 +45,11 @@ let package = Package(
             name: "KeychainStore",
             dependencies: ["SecureMemory"],
             path: "Sources/KeychainStore"
+        ),
+        .target(
+            name: "SSHIdentity",
+            dependencies: [],
+            path: "Sources/SSHIdentity"
         ),
         .target(
             name: "PinentryUI",
@@ -83,6 +89,11 @@ let package = Package(
             name: "KeychainStoreTests",
             dependencies: ["KeychainStore", "SecureMemory"],
             path: "Tests/KeychainStoreTests"
+        ),
+        .testTarget(
+            name: "SSHIdentityTests",
+            dependencies: ["SSHIdentity"],
+            path: "Tests/SSHIdentityTests"
         ),
         .testTarget(
             name: "PinentryUITests",
