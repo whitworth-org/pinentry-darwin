@@ -221,18 +221,21 @@ jobs:
       - name: Compute SHA-256 sums and write step summary
         run: |
           set -euo pipefail
-          PKG="build/pinentry-darwin-${VERSION}.pkg"
-          TGZ="build/pinentry-darwin-${VERSION}-arm64.tar.gz"
-          PKG_SUM="$(shasum -a 256 "$PKG" | awk '{print $1}')"
-          TGZ_SUM="$(shasum -a 256 "$TGZ" | awk '{print $1}')"
+          PKG_NAME="pinentry-darwin-${VERSION}.pkg"
+          TGZ_NAME="pinentry-darwin-${VERSION}-arm64.tar.gz"
+          # Emit standard `<hash>  <filename>` so downloaders can run
+          # `shasum -a 256 --ignore-missing -c sha256sums.txt` directly.
+          (cd build && shasum -a 256 "$PKG_NAME" "$TGZ_NAME") > sha256sums.txt
+          PKG_SUM="$(awk -v f="$PKG_NAME" '$2 == f {print $1}' sha256sums.txt)"
+          TGZ_SUM="$(awk -v f="$TGZ_NAME" '$2 == f {print $1}' sha256sums.txt)"
           {
             echo "## pinentry-darwin ${VERSION}"
             echo
             echo "| Artifact | SHA-256 |"
             echo "|---|---|"
-            echo "| \`$(basename "$PKG")\` | \`${PKG_SUM}\` |"
-            echo "| \`$(basename "$TGZ")\` | \`${TGZ_SUM}\` |"
-          } | tee "$GITHUB_STEP_SUMMARY" sha256sums.txt > /dev/null
+            echo "| \`${PKG_NAME}\` | \`${PKG_SUM}\` |"
+            echo "| \`${TGZ_NAME}\` | \`${TGZ_SUM}\` |"
+          } > "$GITHUB_STEP_SUMMARY"
 
       - name: Publish draft GitHub Release
         # Native `gh release create` is preinstalled on the runner and
