@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // pinentry-darwin
 //
@@ -10,14 +10,15 @@
 // HARD RULES (per project CLAUDE.md):
 //   - No third-party dependencies. Standard library + Apple frameworks only.
 //   - Swift 6 language mode, strict concurrency.
-//   - macOS 15.0+ (for the latest Observation / SwiftUI / SecItem APIs).
+//   - macOS 26.0+ (for the Secure-Enclave-backed SSH SecurityKeyProvider
+//     at /usr/lib/ssh-keychain.dylib).
 
 import PackageDescription
 
 let package = Package(
     name: "pinentry-darwin",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v26)
     ],
     products: [
         .executable(name: "pinentry-darwin", targets: ["PinentryDarwin"]),
