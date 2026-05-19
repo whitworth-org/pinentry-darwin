@@ -66,9 +66,47 @@ public struct RealProcessRunner: ProcessRunner {
             proc.standardError = errPipe
             proc.standardInput = inPipe
 
+            // Drain stdout/stderr concurrently with the child. macOS pipe
+            // buffers cap around 64 KiB — without an active reader, a
+            // child that writes more than that blocks on `write(2)`,
+            // which prevents `terminationHandler` from firing and
+            // deadlocks the call. `readabilityHandler` runs on
+            // Foundation's internal queue, so accumulators are protected
+            // by an unfair-lock (the simplest correct primitive for
+            // exclusive append from arbitrary queues).
+            let outBuf = OSAllocatedUnfairLock<Data>(initialState: Data())
+            let errBuf = OSAllocatedUnfairLock<Data>(initialState: Data())
+
+            outPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    // EOF: detach to break the retain cycle the handler
+                    // closure forms with the FileHandle.
+                    handle.readabilityHandler = nil
+                } else {
+                    outBuf.withLock { $0.append(chunk) }
+                }
+            }
+            errPipe.fileHandleForReading.readabilityHandler = { handle in
+                let chunk = handle.availableData
+                if chunk.isEmpty {
+                    handle.readabilityHandler = nil
+                } else {
+                    errBuf.withLock { $0.append(chunk) }
+                }
+            }
+
             proc.terminationHandler = { p in
-                let outData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
-                let errData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+                // Detach handlers so they cannot fire concurrently with
+                // the trailing readToEnd below.
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
+                // Final drain: anything Foundation buffered after the
+                // last readabilityHandler tick lands here.
+                let trailingOut = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+                let trailingErr = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+                let outData = outBuf.withLock { $0 + trailingOut }
+                let errData = errBuf.withLock { $0 + trailingErr }
                 let result = ProcessResult(
                     exitCode: p.terminationStatus,
                     stdout: String(decoding: outData, as: UTF8.self),
@@ -85,6 +123,12 @@ public struct RealProcessRunner: ProcessRunner {
                 try? inPipe.fileHandleForWriting.close()
             } catch {
                 log.error("process run failed: \(String(describing: error), privacy: .public)")
+                // proc.run() threw before launch, so terminationHandler
+                // will not fire. Detach the readability handlers we
+                // installed above to break their retain cycles before
+                // resuming on the error path.
+                outPipe.fileHandleForReading.readabilityHandler = nil
+                errPipe.fileHandleForReading.readabilityHandler = nil
                 cont.resume(throwing: error)
             }
         }

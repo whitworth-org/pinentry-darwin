@@ -263,11 +263,17 @@ public struct KeychainStore: Sendable {
             do {
                 try legacyBytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
                     let secure = SecureBytes(copying: buf)
+                    // KC-10: migrate under the caller's resolved policy
+                    // (which includes any per-fingerprint override from
+                    // KeyPolicyStore). The previous code wrote with
+                    // `defaultPolicy` and silently downgraded strict ACLs
+                    // (.biometryCurrentSet → .userPresence) on the first
+                    // legacy hit.
                     try store(
                         fingerprint: fingerprint,
                         label: nil,
                         passphrase: secure,
-                        policy: defaultPolicy
+                        policy: resolvedPolicy
                     )
                 }
                 // Only delete the legacy entry if the data-protection write

@@ -9,8 +9,8 @@
 //   * arg-parsing crashes inside the percent-decode chain (already
 //     covered by the LineCodec target, but the SETKEYINFO/SETTIMEOUT/
 //     OPTION sub-parsers do their own structural parsing);
-//   * `parseUserIdFromDescription` corner cases — quoted-pair scanning
-//     across multi-byte UTF-8 boundaries.
+//   * Mnemonic strip / sanitiseBody on adversarial grapheme-cluster
+//     shapes (FV-6 codepoints, BOM-only inputs).
 //
 // Bytes are best-effort decoded as UTF-8; non-UTF-8 input is skipped.
 // Real Assuan lines are pure ASCII once on the wire, but we still throw
@@ -33,12 +33,7 @@ public func fuzzCommandOnce(_ bytes: [UInt8]) {
 
     _ = try? Command.parse(cleaned)
 
-    // Also exercise the public helper that runs over SETDESC text. It
-    // never throws — we just look for crashes on adversarial quote
-    // patterns and oversized inputs.
-    _ = Command.parseUserIdFromDescription(cleaned)
-
-    // And the fingerprint validator — pure-string over arbitrary input.
+    // The fingerprint validator — pure-string over arbitrary input.
     _ = Command.isValidFingerprint(cleaned)
 
     // Mnemonic sanitisers run on attacker-shaped labels and body text.

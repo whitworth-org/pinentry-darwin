@@ -236,31 +236,6 @@ extension Command {
         }
     }
 
-    /// Extract the OpenPGP user-id from a typical gpg-agent SETDESC payload.
-    ///
-    /// gpg-agent's stock description ends with the user-id in quotes:
-    ///   `Please enter the passphrase ... "Alice <a@b>" ...`
-    ///
-    /// We pick the LAST quoted pair (a localised description may itself
-    /// open with quoted text), cap the result at 256 characters, and
-    /// reject anything containing C0 control bytes (< 0x20) or DEL
-    /// (0x7F). Returns nil if no balanced pair is found or the candidate
-    /// fails validation. The keychain layer uses this as `kSecAttrLabel`.
-    public static func parseUserIdFromDescription(_ description: String?) -> String? {
-        guard let description else { return nil }
-        guard let lastQuote = description.lastIndex(of: "\"") else { return nil }
-        let head = description[..<lastQuote]
-        guard let openQuote = head.lastIndex(of: "\"") else { return nil }
-        let inner = description[description.index(after: openQuote)..<lastQuote]
-        if inner.isEmpty { return nil }
-        let capped = inner.prefix(256)
-        for scalar in capped.unicodeScalars {
-            let v = scalar.value
-            if v < 0x20 || v == 0x7F { return nil }
-        }
-        return String(capped)
-    }
-
     private static func parseSetTimeout(_ args: String) throws -> Command {
         let trimmed = args.trimmingCharacters(in: .whitespaces)
         guard let n = Int(trimmed) else {
