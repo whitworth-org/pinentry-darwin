@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-# CI: build, test, audit, and smoke-test pinentry-darwin on every PR / push to main.
+# CI: build, test, and audit pinentry-darwin on every PR / push to main.
+# The Assuan smoke test is part of `swift test` (Tests/IntegrationSmokeTests/).
 #
 # Security model:
 #   - No secrets are referenced anywhere in this workflow; PR runs from forks
@@ -100,13 +101,8 @@ jobs:
           make build
 
       - name: Make audit (static bundle checks)
-        # The audit-bundle.sh script accepts an ad-hoc-signed binary in CI;
-        # full Developer ID signing only runs in release.yml.
+        # The audit-bundle Swift tool accepts an ad-hoc-signed binary in
+        # CI; full Developer ID signing only runs in release.yml.
         run: |
           set -euo pipefail
           make audit
-
-      - name: Make smoke (Assuan transcript)
-        run: |
-          set -euo pipefail
-          make smoke
