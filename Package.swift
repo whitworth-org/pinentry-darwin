@@ -57,6 +57,7 @@ let package = Package(
                 "SecureMemory",
                 "AssuanProtocol",
                 "KeychainStore",
+                "SSHIdentity",
             ],
             path: "Sources/PinentryUI"
         ),
