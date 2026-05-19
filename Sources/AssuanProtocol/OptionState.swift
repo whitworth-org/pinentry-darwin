@@ -32,7 +32,6 @@ public struct OptionState: Sendable, Equatable {
     public var ownerPID: pid_t?
     public var ownerUID: uid_t?
     public var ownerHost: String?
-    public var parentWindowID: Int?
     public var invisibleChar: String?
     public var formattedPassphrase: Bool = false
     public var formattedPassphraseHint: String?
@@ -141,11 +140,6 @@ public struct OptionState: Sendable, Equatable {
 
         case "owner":
             applyOwner(value)
-
-        case "parent-wid":
-            if let v = value, let n = Int(v) {
-                parentWindowID = n
-            }
 
         case "touch-file":
             touchFile = value

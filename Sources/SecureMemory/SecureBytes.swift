@@ -128,20 +128,15 @@ public final class SecureBytes: @unchecked Sendable {
     /// `Array<UInt8>` is value-typed and the caller still owns it. If the
     /// input is sensitive, wipe it explicitly after this initialiser returns.
     public convenience init(_ bytes: [UInt8]) {
-        // `Array.withUnsafeBufferPointer` synchronously hands us a buffer
-        // whose lifetime is the closure's; calling `init(copying:)` inside
-        // the closure copies its contents before we return. Swift's two-
-        // phase init permits delegating to another `init` from a closure.
-        let secure = bytes.withUnsafeBufferPointer { buf -> SecureBytes in
-            SecureBytes(copying: buf)
-        }
-        // Adopt `secure`'s storage: copy the same logical bytes into a new
-        // mapping owned by `self`. We can't reuse `secure`'s mapping (would
-        // require non-trivial ownership transfer); instead just re-copy.
-        // The temporary `secure` is wiped on its own deinit at end of init.
-        self.init(capacity: secure._capacity)
-        secure.withUnsafeBytes { src in
-            self.append(contentsOf: src)
+        // Swift's two-phase init lets the convenience init delegate to
+        // the designated `init(capacity:)` and then call `self.append`.
+        // Earlier versions of this initialiser routed through a temporary
+        // `SecureBytes(copying:)`, which allocated and mlock'd a second
+        // page only to copy out of it again. The direct path is
+        // semantically equivalent and avoids that intermediate mapping.
+        self.init(capacity: bytes.count)
+        bytes.withUnsafeBufferPointer { buf in
+            self.append(contentsOf: buf)
         }
     }
 

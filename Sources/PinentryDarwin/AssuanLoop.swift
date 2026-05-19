@@ -701,8 +701,3 @@ final class AssuanLoop {
     }
 }
 
-// User-id extraction lives in `Command.parseUserIdFromDescription`
-// (Sources/AssuanProtocol/Command.swift) so it is testable from the
-// AssuanProtocol test target. The bounded, last-quoted-pair version
-// also rejects control bytes that would otherwise corrupt
-// kSecAttrLabel and Keychain Access display.

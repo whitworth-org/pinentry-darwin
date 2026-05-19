@@ -35,8 +35,8 @@ The four targets
     and data-line variants). Asserts byte equality after round-trip.
 
   PinentryFuzzCommand
-    Throws raw bytes at Command.parse() plus the public helpers
-    parseUserIdFromDescription and isValidFingerprint.
+    Throws raw bytes at Command.parse() plus isValidFingerprint and the
+    Mnemonic.strip / sanitiseBody helpers.
 
   PinentryFuzzMnemonic
     Throws Unicode strings at Mnemonic.strip(). Asserts that strings
