@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: MIT
-# CI: build, test, and audit pinentry-darwin on every PR / push to main.
+# CI: build, test, and audit pinentry-darwin on every PR / push to main,
+# plus lint the workflow files themselves with zizmor.
 # The Assuan smoke test is part of `swift test` (Tests/IntegrationSmokeTests/).
 #
 # Security model:
 #   - No secrets are referenced anywhere in this workflow; PR runs from forks
 #     would have read-only secrets anyway, but we make the absence explicit.
-#   - Workflow-level permissions deny everything by default; the build job
-#     opts in only to the minimum scopes it needs (contents+actions read).
-#   - Runner is hardened via step-security/harden-runner (audit mode for now).
+#   - Workflow-level permissions deny everything by default; each job opts in
+#     only to the minimum scopes it needs.
+#   - Runner is hardened via step-security/harden-runner. The build and zizmor
+#     jobs declare different egress allowlists for what each one needs.
 #   - Checkout uses persist-credentials: false so the GITHUB_TOKEN is not left
 #     on disk for subsequent steps.
 name: CI
@@ -106,3 +108,38 @@ jobs:
         run: |
           set -euo pipefail
           make audit
+
+  zizmor:
+    name: zizmor-lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@a5ad31d6a139d249332a2605b85202e8c0b78450 # v2.19.1
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            api.github.com:443
+            codeload.github.com:443
+            ghcr.io:443
+            github.com:443
+            objects.githubusercontent.com:443
+            pkg-containers.githubusercontent.com:443
+            raw.githubusercontent.com:443
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Run zizmor
+        # advanced-security: false because this is a private repo on Free,
+        # where code-scanning SARIF upload requires GHAS. Findings surface
+        # as PR annotations instead. (Re-enable if the repo goes public or
+        # buys GHAS.) zizmor is a hard gate: non-zero exit fails the job.
+        uses: zizmorcore/zizmor-action@b1d7e1fb5de872772f31590499237e7cce841e8e # v0.5.3
+        with:
+          advanced-security: false
+          annotations: true
