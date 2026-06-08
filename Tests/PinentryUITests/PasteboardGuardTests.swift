@@ -89,6 +89,67 @@ final class PasteboardGuardTests: XCTestCase {
                      "pasteboard must be empty after clear")
     }
 
+    // MARK: L-5 — abandonment paths (cancel / close / timeout) clear too
+
+    // The submit path and the abandonment paths (cancel, red-X close,
+    // timeout) both call `clearIfAdvanced(since:enabled:on:)` with the
+    // SAME baseline + opt-in. This pins the contract that a paste-fill
+    // abandoned via Cancel is cleared exactly as it would be on submit —
+    // the residue must not survive an abandoned dialog. We assert via the
+    // shared primitive both call sites use, with an injected pasteboard so
+    // we never touch the user's clipboard.
+    func testAbandonmentPathClearsPasteFillWhenEnabled() {
+        let baseline = PasteboardGuard.snapshot(of: pasteboard)
+        // User paste-filled the passphrase, then abandoned via Cancel.
+        pasteboard.clearContents()
+        pasteboard.setString("paste-filled-passphrase", forType: .string)
+        XCTAssertGreaterThan(pasteboard.changeCount, baseline)
+
+        let cleared = PasteboardGuard.clearIfAdvanced(
+            since: baseline,
+            enabled: true,
+            on: pasteboard
+        )
+        XCTAssertTrue(cleared, "abandoned paste-fill must be cleared")
+        XCTAssertNil(pasteboard.string(forType: .string),
+                     "pasteboard must be empty after an abandoned dialog clears it")
+    }
+
+    // The abandonment-path clear honours the same opt-out as submit: if
+    // the user disabled clearPasteboardOnSubmit, cancel must not touch
+    // the pasteboard either.
+    func testAbandonmentPathRespectsOptOut() {
+        let baseline = PasteboardGuard.snapshot(of: pasteboard)
+        pasteboard.clearContents()
+        pasteboard.setString("user-opted-out", forType: .string)
+
+        let cleared = PasteboardGuard.clearIfAdvanced(
+            since: baseline,
+            enabled: false,
+            on: pasteboard
+        )
+        XCTAssertFalse(cleared, "opt-out must short-circuit the abandonment-path clear")
+        XCTAssertEqual(pasteboard.string(forType: .string), "user-opted-out")
+    }
+
+    // No paste happened during the dialog: the abandonment path must NOT
+    // clear an unrelated clipboard the user populated before opening the
+    // dialog (changeCount did not advance past baseline).
+    func testAbandonmentPathLeavesUnchangedPasteboardAlone() {
+        pasteboard.clearContents()
+        pasteboard.setString("pre-existing-unrelated", forType: .string)
+        let baseline = PasteboardGuard.snapshot(of: pasteboard)
+
+        let cleared = PasteboardGuard.clearIfAdvanced(
+            since: baseline,
+            enabled: true,
+            on: pasteboard
+        )
+        XCTAssertFalse(cleared, "no advance since baseline => no clear on abandonment")
+        XCTAssertEqual(pasteboard.string(forType: .string), "pre-existing-unrelated",
+                       "must not wipe a clipboard untouched during the dialog")
+    }
+
     // MARK: idempotency
 
     func testClearIfAdvancedIsIdempotent() {
