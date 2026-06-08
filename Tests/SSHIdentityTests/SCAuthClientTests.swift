@@ -34,7 +34,9 @@ final class SCAuthClientTests: XCTestCase {
         ])
 
         let client = SCAuthClient(binary: "/usr/sbin/sc_auth", runner: mock)
-        let identities = try await client.listIdentities()
+        let listing = try await client.listIdentities()
+        XCTAssertNil(listing.partial)
+        let identities = listing.identities
         XCTAssertEqual(identities.count, 1)
         XCTAssertEqual(identities[0].publicKeyHash, "A71277F0BC5825A7B3576D014F31282A866EF3BC")
         XCTAssertEqual(identities[0].sshFingerprint, "SHA256:vs4ByYo+T9M3V8iiDYONMSvx2k5Fj2ujVBWt1j6yzis")
@@ -47,7 +49,10 @@ final class SCAuthClientTests: XCTestCase {
         XCTAssertEqual(calls[1].arguments, ["list-ctk-identities", "-t", "ssh"])
     }
 
-    func testListReturnsHexOnlyWhenSSHCountMismatches() async throws {
+    // L-10: a hex/ssh row-count mismatch must not silently truncate.
+    // We still return best-effort hex rows, but flag the partial result
+    // so the manager can surface it to the operator.
+    func testListFlagsPartialWhenSSHCountMismatches() async throws {
         let hexOut = headerHex + "\n" +
             "p-256-ne A71277F0BC5825A7B3576D014F31282A866EF3BC bio  ssh-a ssh-a                     23.11.26, 17:09 YES\n" +
             "p-256-ne B71277F0BC5825A7B3576D014F31282A866EF3BC bio  ssh-b ssh-b                     23.11.26, 17:09 YES\n"
@@ -61,9 +66,13 @@ final class SCAuthClientTests: XCTestCase {
         ])
 
         let client = SCAuthClient(binary: "/usr/sbin/sc_auth", runner: mock)
-        let identities = try await client.listIdentities()
-        XCTAssertEqual(identities.count, 2)
-        XCTAssertNil(identities[0].sshFingerprint)
+        let listing = try await client.listIdentities()
+        XCTAssertEqual(listing.identities.count, 2)
+        XCTAssertNil(listing.identities[0].sshFingerprint)
+        XCTAssertEqual(
+            listing.partial,
+            .fingerprintCountMismatch(hexRows: 2, sshRows: 0)
+        )
     }
 
     func testListSurfacesParseErrorOnBadHeader() async {

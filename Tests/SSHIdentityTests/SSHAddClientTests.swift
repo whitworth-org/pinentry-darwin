@@ -27,8 +27,8 @@ final class SSHAddClientTests: XCTestCase {
             provider: "/usr/lib/ssh-keychain.dylib",
             runner: mock
         )
-        let fps = try await client.registerSecurityKeyProvider()
-        XCTAssertEqual(fps, ["SHA256:abc"])
+        // I-7: returns Void now; success is "did not throw".
+        try await client.registerSecurityKeyProvider()
 
         let calls = await mock.calls
         XCTAssertEqual(calls[0].executable, "/usr/bin/ssh-add")
@@ -74,6 +74,39 @@ final class SSHAddClientTests: XCTestCase {
         let client = SSHAddClient(runner: mock)
         let keys = try await client.listAgentIdentities()
         XCTAssertEqual(keys, [])
+    }
+
+    // L-9: a key whose *comment* contains the empty-agent sentinel must
+    // NOT be dropped. Pre-fix this string matched anywhere in stdout and
+    // returned an empty list, silently hiding every key.
+    func testListAgentKeepsKeyWhoseCommentContainsSentinel() async throws {
+        let stdout =
+            "sk-ecdsa-sha2-nistp256@openssh.com AAAA the agent has no identities\n"
+        let mock = MockProcessRunner(fallback: [
+            ProcessResult(exitCode: 0, stdout: stdout, stderr: ""),
+        ])
+        let client = SSHAddClient(runner: mock)
+        let keys = try await client.listAgentIdentities()
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertEqual(keys[0].keyType, "sk-ecdsa-sha2-nistp256@openssh.com")
+        XCTAssertEqual(keys[0].comment, "the agent has no identities")
+    }
+
+    // L-9: the sentinel is only honoured on a clean exit-1 + stdout. The
+    // same phrase appearing on stderr while a real key is on stdout must
+    // not be mistaken for an empty agent.
+    func testListAgentDoesNotTreatStderrPhraseAsEmpty() async throws {
+        let mock = MockProcessRunner(fallback: [
+            ProcessResult(
+                exitCode: 0,
+                stdout: "ssh-ed25519 AAAAC3 user@host\n",
+                stderr: "warning: the agent has no identities\n"
+            ),
+        ])
+        let client = SSHAddClient(runner: mock)
+        let keys = try await client.listAgentIdentities()
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertEqual(keys[0].keyType, "ssh-ed25519")
     }
 
     func testListAgentSurfacesUnexpectedFailure() async {
