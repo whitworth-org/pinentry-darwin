@@ -47,6 +47,18 @@ final class PinentryWindowTests: XCTestCase {
                       "collectionBehavior must include .ignoresCycle")
     }
 
+    // I-6: state-restoration opt-out. A restorable window lets AppKit
+    // persist an encoded snapshot of the window to the per-user saved-
+    // application-state store (and can capture a window image while
+    // saving). For a passphrase prompt that risks serialising dialog
+    // state to disk under ~/Library/Saved Application State. pinentry
+    // dialogs are single-shot and must never be restored on relaunch.
+    func testIsNotRestorable() {
+        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
+        XCTAssertFalse(win.isRestorable,
+                       "PinentryWindow must opt out of state restoration so dialog state is never serialised to disk")
+    }
+
     // NSPanel migration: PinentryWindow is now an NSPanel subclass for
     // its modal-friendly behaviours. The previous NSWindow base would
     // not surface `worksWhenModal` or `becomesKeyOnlyIfNeeded` in a
