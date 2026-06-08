@@ -23,7 +23,7 @@ final class AuthenticatorTests: XCTestCase {
         XCTAssertNil(Authenticator.sanitize("    "))
     }
 
-    func testTypicalSetdescPasses() {
+    func testTypicalSetDescPasses() {
         let s = "Please enter the passphrase to unlock the OpenPGP key 0xDEADBEEF"
         XCTAssertEqual(Authenticator.sanitize(s), s)
     }
@@ -96,7 +96,7 @@ final class AuthenticatorTests: XCTestCase {
     // The whole point: a hostile SETDESC that visually presents one key
     // identifier via RLO ends up displaying the underlying bytes verbatim
     // on the Touch ID sheet.
-    func testNeutralisesHostileSetdesc() {
+    func testNeutralisesHostileSetDesc() {
         let hostile = "Unlock key \u{202E}AAAA\u{202C} for Alice"
         XCTAssertEqual(
             Authenticator.sanitize(hostile),
@@ -105,17 +105,18 @@ final class AuthenticatorTests: XCTestCase {
     }
 
     func testUnicodeRespectsByteCap() {
-        // Each emoji = 4 bytes. Make sure we cap on a scalar boundary,
-        // never split a multibyte sequence in half.
+        // Each shield+VS16 grapheme = 7 bytes. Make sure we cap on a
+        // scalar boundary, never split a multibyte sequence in half.
         let s = String(repeating: "🛡️", count: 200)  // way over 256 bytes
         let sanitized = Authenticator.sanitize(s)
         XCTAssertNotNil(sanitized)
         XCTAssertLessThanOrEqual(sanitized!.utf8.count, Authenticator.maxReasonBytes)
         // Must still be valid UTF-8 (Swift String guarantees this; reading
         // .utf8 implicitly validates).
-        XCTAssertEqual(sanitized!.utf8.count % 4 == 0 || sanitized!.utf8.count % 4 == 1,
-                       true,
-                       "shield+VS16 = 7 bytes; check the cap doesn't slice mid-scalar")
+        XCTAssertTrue(
+            sanitized!.utf8.count % 7 == 0 || sanitized!.utf8.count % 7 == 4,
+            "shield+VS16 = 7 bytes; check the cap doesn't slice mid-scalar"
+        )
     }
 
     // MARK: makeContext

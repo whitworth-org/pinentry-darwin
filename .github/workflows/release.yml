@@ -102,16 +102,16 @@ jobs:
           MAINTAINER_FPR: 1EA93FE7B6638F3C6B6E9C5C2ABD2764D9D7175C
         run: |
           set -euo pipefail
-          # Capture combined output without letting gpg's exit code
-          # collapse the pipeline. gpg can exit non-zero on `tag -v`
-          # for trust-class warnings even when the signature is good
-          # and the key is ultimately trusted via ownertrust above.
-          # Authority is the textual presence of "Good signature" AND
-          # the maintainer fingerprint — both must appear.
-          verify_output="$(git tag -v "$GITHUB_REF_NAME" 2>&1 || true)"
-          if ! grep -q "Good signature" <<<"$verify_output" \
-             || ! grep -qF "$MAINTAINER_FPR" <<<"$verify_output"; then
+          # Use machine-readable GPG status lines. `git tag -v` prints the
+          # tag object's message before its human-readable GPG output, so a
+          # malicious tag message can spoof strings like "Good signature".
+          verify_output="$(git verify-tag --raw "$GITHUB_REF_NAME" 2>&1)" || {
             echo "::error::Tag $GITHUB_REF_NAME is not signed by a trusted key" >&2
+            awk '{print "  " $0}' <<<"$verify_output" >&2
+            exit 1
+          }
+          if ! grep -qE "^\\[GNUPG:\\] VALIDSIG ${MAINTAINER_FPR}( |$)" <<<"$verify_output"; then
+            echo "::error::Tag $GITHUB_REF_NAME is not signed by maintainer $MAINTAINER_FPR" >&2
             awk '{print "  " $0}' <<<"$verify_output" >&2
             exit 1
           fi
@@ -140,6 +140,11 @@ jobs:
           KEYCHAIN_PATH="$RUNNER_TEMP/runner.keychain-db"
           BUILD_CERT_PATH="$RUNNER_TEMP/build_cert.p12"
           INSTALLER_CERT_PATH="$RUNNER_TEMP/installer_cert.p12"
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "BUILD_CERT_PATH=$BUILD_CERT_PATH"
+            echo "INSTALLER_CERT_PATH=$INSTALLER_CERT_PATH"
+          } >> "$GITHUB_ENV"
 
           # Decode certs from base64. Use printenv (no echoing on cmdline).
           printenv BUILD_CERTIFICATE_BASE64 | base64 -d > "$BUILD_CERT_PATH"
@@ -173,8 +178,6 @@ jobs:
           # Securely delete decoded p12s
           rm -P "$BUILD_CERT_PATH" "$INSTALLER_CERT_PATH"
 
-          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
-
       - name: Provision notarytool credentials
         env:
           NOTARY_API_KEY_BASE64: ${{ secrets.NOTARY_API_KEY_BASE64 }}
@@ -184,13 +187,13 @@ jobs:
         run: |
           set -euo pipefail
           AUTH_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          echo "AUTH_KEY_PATH=$AUTH_KEY_PATH" >> "$GITHUB_ENV"
           printenv NOTARY_API_KEY_BASE64 | base64 -d > "$AUTH_KEY_PATH"
           xcrun notarytool store-credentials pinentry-darwin-notary \
             --key "$AUTH_KEY_PATH" \
             --key-id "$NOTARY_API_KEY_ID" \
             --issuer "$NOTARY_API_ISSUER_ID" \
             --keychain "$KEYCHAIN_PATH"
-          echo "AUTH_KEY_PATH=$AUTH_KEY_PATH" >> "$GITHUB_ENV"
 
       - name: Verify signing identity is visible
         run: |
@@ -259,9 +262,11 @@ jobs:
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
           set -uo pipefail
-          if [ -n "${AUTH_KEY_PATH:-}" ] && [ -f "$AUTH_KEY_PATH" ]; then
-            rm -P "$AUTH_KEY_PATH" || true
-          fi
+          for secret_path in "${BUILD_CERT_PATH:-}" "${INSTALLER_CERT_PATH:-}" "${AUTH_KEY_PATH:-}"; do
+            if [ -n "$secret_path" ] && [ -f "$secret_path" ]; then
+              rm -P "$secret_path" || true
+            fi
+          done
           if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
             security delete-keychain "$KEYCHAIN_PATH" || true
           fi

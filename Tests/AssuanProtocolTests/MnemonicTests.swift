@@ -162,7 +162,7 @@ final class MnemonicTests: XCTestCase {
     // Hostile SETDESC: leading "Unlock 0xAAAA" rewritten via RLO to
     // visually present a different fingerprint. After sanitiseBody the
     // RLO is gone and the underlying byte sequence is what gets shown.
-    func testSanitiseBodyNeutralisesHostileSetdesc() {
+    func testSanitiseBodyNeutralisesHostileSetDesc() {
         let hostile = "Unlock key \u{202E}AAAA\u{202C} for Alice"
         XCTAssertEqual(
             Mnemonic.sanitiseBody(hostile),

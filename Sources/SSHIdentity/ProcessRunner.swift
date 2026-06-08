@@ -122,7 +122,7 @@ public struct RealProcessRunner: ProcessRunner {
                 }
                 try? inPipe.fileHandleForWriting.close()
             } catch {
-                log.error("process run failed: \(String(describing: error), privacy: .public)")
+                log.error("process run failed: \(String(describing: error), privacy: .private)")
                 // proc.run() threw before launch, so terminationHandler
                 // will not fire. Detach the readability handlers we
                 // installed above to break their retain cycles before
