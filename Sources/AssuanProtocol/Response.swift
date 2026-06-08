@@ -149,29 +149,35 @@ extension Response {
     /// Build a "VERB body\n" wire line as `Data`. Never used for secret
     /// payloads — those go through `encodeSecretDataLines` exclusively.
     ///
-    /// AS-3: assert that `body` carries no embedded LF/CR/NUL. Today
-    /// every call site passes hardcoded text (M8 hardening), so the
-    /// precondition is free; it catches future regressions that pipe
-    /// attacker-controlled bytes into `body` (which would otherwise let
-    /// the attacker forge wire responses by smuggling an LF).
+    /// AS-3: the body must carry no embedded LF/CR/NUL/DEL — those bytes
+    /// could forge wire framing (CRLF injection) or signal a malformed
+    /// caller. Today every call site passes hardcoded text (M8 hardening),
+    /// but rather than `precondition`-aborting the whole process on a
+    /// future regression that routes attacker-influenced text through
+    /// here, we *defensively drop* the forbidden bytes before appending.
+    /// Stripped bytes cannot forge framing, so the anti-injection
+    /// guarantee holds without turning a CRLF-injection bug into an
+    /// attacker-triggerable abort (DoS).
     private func lineData(prefix: String, body: String?) -> Data {
         var d = Data()
         d.append(contentsOf: prefix.utf8)
         if let body, !body.isEmpty {
-            // AS-3 boundary check. Also reject 0x7F DEL out of an
-            // abundance of caution — it has no business in a verb body
-            // and signals a malformed caller.
-            for b in body.utf8 {
-                precondition(
-                    b != 0x0A && b != 0x0D && b != 0x00 && b != 0x7F,
-                    "Response.lineData body must not contain LF/CR/NUL/DEL"
-                )
-            }
             d.append(0x20) // space
-            d.append(contentsOf: body.utf8)
+            for b in body.utf8 where !Self.isForbiddenWireByte(b) {
+                d.append(b)
+            }
         }
         d.append(0x0A) // LF
         return d
+    }
+
+    /// AS-3: bytes that must never reach a verb-line body — LF (0x0A) and
+    /// CR (0x0D) forge wire framing, NUL (0x00) and DEL (0x7F) signal a
+    /// malformed caller. Dropped (not aborted on) so a CRLF-injection bug
+    /// cannot be escalated into an attacker-triggerable process abort.
+    @inline(__always)
+    private static func isForbiddenWireByte(_ b: UInt8) -> Bool {
+        b == 0x0A || b == 0x0D || b == 0x00 || b == 0x7F
     }
 
     /// SL-1 / FZ-1: encode a `D` line carrying a SecureBytes payload.
