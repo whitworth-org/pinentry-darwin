@@ -7,7 +7,7 @@
 // and its consumers grep its output to detect regressions. Stable,
 // parseable text on stdout/stderr is the contract.
 //
-// Output contract (matches the legacy `scripts/audit-bundle.sh`):
+// Output contract (consumed by Makefile/CI; keep stable):
 //   - `audit: FAIL — <reason>` per failed assertion, on stderr
 //   - `audit: PASS (<bundle>)` on success, on stdout
 //   - `audit: FAIL — <n> issue(s) found in <bundle>` summary, on stderr
