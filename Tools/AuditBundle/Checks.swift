@@ -8,8 +8,9 @@
 // appends `audit: FAIL — <reason>` lines for any violation. The
 // caller's exit code is determined by `findings.count` at the end.
 //
-// We mirror `scripts/audit-bundle.sh` line-for-line; future divergence
-// must be explicit, since the legacy script is the regression baseline.
+// These predicates are the sole bundle-audit enforcement (the former
+// scripts/audit-bundle.sh was retired in favour of this tool); the
+// AuditBundleTests suite is the regression baseline.
 
 import Foundation
 
@@ -73,9 +74,71 @@ public func checkMachOShape(_ paths: BundlePaths, _ findings: inout Findings) {
                 findings.fail("non-system dylib linked: \(dep)")
             }
         }
+
+        // otool -l exposes the load commands `otool -L` hides: rpath
+        // search paths (LC_RPATH) and @rpath/@loader_path-relative dylib
+        // install names. For a single-binary, zero-dependency tool, every
+        // dependency is pinned to an absolute system path, so any rpath
+        // entry or relative install name is an unexpected dylib-hijack
+        // search surface, not a legitimate dependency.
+        let loadResult = try runProcess("/usr/bin/otool", ["-l", paths.binary])
+        checkLoadCommands(loadResult.stdout, &findings)
     } catch {
         findings.fail("Mach-O inspection failed: \(error)")
     }
+}
+
+/// Walk `otool -l` output and flag rpath / relative-install-name surfaces.
+///
+/// `otool -l` prints each load command as a `cmd <TYPE>` line followed by
+/// indented fields; LC_RPATH carries a `path <value>` field and the dylib
+/// load commands carry a `name <value>` field. We track the current command
+/// type so each value is attributed correctly.
+func checkLoadCommands(_ output: String, _ findings: inout Findings) {
+    var currentCmd = ""
+    for rawLine in output.split(separator: "\n", omittingEmptySubsequences: true) {
+        let line = rawLine.trimmingCharacters(in: .whitespaces)
+        if line.hasPrefix("cmd ") {
+            currentCmd = String(line.dropFirst("cmd ".count))
+            continue
+        }
+        if currentCmd == "LC_RPATH", line.hasPrefix("path ") {
+            let path = loadCommandValue(line, field: "path")
+            if !isToolchainRpath(path) {
+                findings.fail("unexpected LC_RPATH search path: \(path)")
+            }
+        } else if currentCmd == "LC_LOAD_DYLIB" || currentCmd == "LC_LOAD_WEAK_DYLIB" {
+            if line.hasPrefix("name ") {
+                let name = loadCommandValue(line, field: "name")
+                if name.hasPrefix("@rpath") || name.hasPrefix("@loader_path")
+                    || name.hasPrefix("@executable_path") {
+                    findings.fail("relative dylib install name (@rpath/@loader_path): \(name)")
+                }
+            }
+        }
+    }
+}
+
+/// Extract the value from an `otool -l` field line such as
+/// `path @loader_path (offset 12)` → `@loader_path`. Strips the field
+/// keyword and the trailing `(offset N)` annotation otool appends.
+func loadCommandValue(_ line: String, field: String) -> String {
+    var rest = String(line.dropFirst(field.count + 1))
+    if let range = rest.range(of: " (offset ") {
+        rest = String(rest[..<range.lowerBound])
+    }
+    return rest.trimmingCharacters(in: .whitespaces)
+}
+
+/// True for the rpaths the Swift toolchain injects into every binary and
+/// which carry no hijack surface here (no dylib resolves via @rpath):
+/// `/usr/lib/swift`, the inert `@loader_path`, and the build-machine-only
+/// Xcode developer toolchain dir (absent from user systems).
+func isToolchainRpath(_ path: String) -> Bool {
+    if path == "@loader_path" { return true }
+    if path.hasPrefix("/usr/lib/") || path.hasPrefix("/System/Library/") { return true }
+    if path.contains(".xctoolchain/") { return true }
+    return false
 }
 
 // MARK: - Info.plist invariants
@@ -171,8 +234,18 @@ public func checkEntitlements(
     releaseMode: Bool,
     _ findings: inout Findings
 ) {
-    let plist = loadEntitlements(paths)
-    guard let plist else { return }
+    guard let plist = loadEntitlements(paths) else {
+        // Fail closed in release mode: codesign emitted no embedded
+        // entitlements AND the source file is unreadable, so we cannot
+        // verify the forbidden-key allowlist or get-task-allow=false. A
+        // security verifier must not treat "couldn't read" as "OK".
+        // Non-release/ad-hoc dev builds may legitimately lack readable
+        // entitlements, so we keep the silent no-op there.
+        if releaseMode {
+            findings.fail("could not read entitlements from signed binary or source")
+        }
+        return
+    }
 
     // app-sandbox must be absent / not true — sandbox breaks
     // gpg-agent stdio inheritance.
