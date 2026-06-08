@@ -145,4 +145,102 @@ final class PinViewModelTests: XCTestCase {
         model.submit()
         XCTAssertTrue(model.isSubmitting)
     }
+
+    // MARK: - L-3: deterministic passphrase-buffer wipe on resolution
+
+    // Cancel must zero BOTH buffers deterministically (not wait for
+    // SecureBytes.deinit). After cancel the model's pin/repeatPin must
+    // read empty.
+    @MainActor
+    func testCancelWipesBothBuffers() {
+        var spec = DialogSpec(kind: .pin)
+        spec.repeatPrompt = "Repeat:"
+        let model = PinViewModel(
+            spec: spec,
+            showTypingByDefault: false,
+            saveByDefault: false,
+            onResult: { _ in }
+        )
+        model.setPin(from: "alpha")
+        model.setRepeat(from: "alpha")
+        XCTAssertGreaterThan(model.pin.count, 0)
+        XCTAssertGreaterThan(model.repeatPin.count, 0)
+
+        model.cancel()
+        XCTAssertEqual(model.pin.count, 0, "cancel must zero the pin buffer")
+        XCTAssertEqual(model.repeatPin.count, 0, "cancel must zero the repeat buffer")
+    }
+
+    @MainActor
+    func testWindowClosedWipesBothBuffers() {
+        let model = makeModel()
+        model.setPin(from: "hunter2")
+        XCTAssertGreaterThan(model.pin.count, 0)
+        model.windowClosed()
+        XCTAssertEqual(model.pin.count, 0, "close must zero the pin buffer")
+        XCTAssertEqual(model.repeatPin.count, 0)
+    }
+
+    @MainActor
+    func testTimedOutWipesBothBuffers() {
+        let model = makeModel()
+        model.setPin(from: "swordfish")
+        XCTAssertGreaterThan(model.pin.count, 0)
+        model.timedOut()
+        XCTAssertEqual(model.pin.count, 0, "timeout must zero the pin buffer")
+        XCTAssertEqual(model.repeatPin.count, 0)
+    }
+
+    // Submit must NOT wipe the egress `pin` buffer — its bytes are still
+    // owned by the consumer (AssuanLoop writes them to the wire after
+    // present() returns). It MUST, however, wipe the never-egressed
+    // `repeatPin` since nothing downstream reads it.
+    @MainActor
+    func testSubmitPreservesEgressPinButWipesRepeat() {
+        var spec = DialogSpec(kind: .pin)
+        spec.repeatPrompt = "Repeat:"
+        var delivered: DialogResult?
+        let model = PinViewModel(
+            spec: spec,
+            showTypingByDefault: false,
+            saveByDefault: false,
+            onResult: { delivered = $0 }
+        )
+        model.setPin(from: "alpha")
+        model.setRepeat(from: "alpha")
+        model.submit()
+
+        guard case .pin(let bytes, _) = delivered else {
+            XCTFail("expected .pin result, got \(String(describing: delivered))")
+            return
+        }
+        // Egress buffer is the model's own `pin`; it must still hold the
+        // typed bytes so the consumer can write them to the wire.
+        XCTAssertEqual(bytes.count, 5, "submit must NOT zero the egress pin buffer")
+        let observed = bytes.withUnsafeBytes { Data($0) }
+        XCTAssertEqual(observed, Data("alpha".utf8))
+        // The repeat buffer never egresses, so submit zeros it immediately.
+        XCTAssertEqual(model.repeatPin.count, 0, "submit must zero the repeat buffer")
+    }
+
+    // wipe() is idempotent and safe to call on already-empty buffers.
+    @MainActor
+    func testWipeIsIdempotent() {
+        let model = makeModel()
+        model.setPin(from: "x")
+        model.wipe()
+        XCTAssertEqual(model.pin.count, 0)
+        model.wipe()
+        XCTAssertEqual(model.pin.count, 0)
+    }
+
+    @MainActor
+    private func makeModel() -> PinViewModel {
+        PinViewModel(
+            spec: DialogSpec(kind: .pin),
+            showTypingByDefault: false,
+            saveByDefault: false,
+            onResult: { _ in }
+        )
+    }
 }
