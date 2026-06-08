@@ -40,11 +40,18 @@
 //
 // Per-fingerprint SE key storage
 // ------------------------------
-// One SE key per GPG fingerprint, persisted to UserDefaults under
-// `SEWrapKey/<fingerprint-lower>` as the `dataRepresentation` bytes.
-// Stored in UserDefaults rather than the keychain because the
-// representation is itself SE-encrypted; it carries no secret material
-// that would benefit from keychain ACL protection.
+// One SE key per GPG fingerprint, persisted to the data-protection
+// keychain under service `GnuPG-SEWrap`, account `<fingerprint-lower>`,
+// holding the `dataRepresentation` bytes.
+//
+// SL-4: storing the handle in UserDefaults (the prior design) let any
+// same-user process enumerate, relocate, or delete it — the lever for
+// downgrade / cache-poisoning attacks on the wrap path. The keychain
+// gives the handle the same code-signature ACL the passphrase entry
+// gets. No `.userPresence` ACL is applied: the handle is itself
+// SE-encrypted and useless without the chip, and gating its read on
+// Touch ID would fire a redundant prompt before the real SE ECDH
+// prompt fires on unwrap.
 //
 // Lifecycle
 // ---------
@@ -87,38 +94,102 @@ public enum SecureEnclaveWrapError: Error, Equatable {
     /// SE key invalidation, or wrong wrap key for this fingerprint.
     /// Callers treat this as a cache miss + cleanup.
     case authenticationFailed
+    /// The stored handle bytes were rejected by
+    /// `SecureEnclave.P256.KeyAgreement.PrivateKey(dataRepresentation:)`
+    /// (SL-5). This is a corrupt / foreign-SE handle, NOT a genuine
+    /// biometric or auth failure. Kept distinct from
+    /// `authenticationFailed` so `unwrapIfNeeded` can drop only the
+    /// regenerable wrap key without deleting the user's real keychain
+    /// row.
+    case keyHandleDecodeFailed
 }
 
 // MARK: - SEWrapKeyStore
 
 /// Persists CryptoKit `SecureEnclave.P256.KeyAgreement.PrivateKey`
-/// `dataRepresentation` per fingerprint. The bytes are themselves
-/// SE-encrypted (only the same SE chip can use them), so they need no
-/// additional keychain ACL — UserDefaults is sufficient and avoids a
-/// second keychain row per fingerprint.
+/// `dataRepresentation` per fingerprint in the data-protection keychain.
+///
+/// SL-4: the prior design stored these handles in UserDefaults, where any
+/// same-user process could enumerate, relocate, or delete them. A keychain
+/// row gives the handle the same code-signature ACL the passphrase entry
+/// gets. The bytes are themselves SE-encrypted (only the same SE chip can
+/// use them), so no `.userPresence` ACL is applied — `whenUnlocked,
+/// ThisDeviceOnly` is sufficient and avoids a redundant Touch ID prompt on
+/// handle read.
+///
+/// `service` and `useDataProtectionKeychain` are injectable for the same
+/// reason `KeychainStore` injects them: the `swift test` binary is
+/// ad-hoc-signed and cannot establish a data-protection identity, so tests
+/// pin themselves to the legacy backend with a unique service name.
 public struct SEWrapKeyStore: @unchecked Sendable {
 
-    private static let prefix = "SEWrapKey/"
-    private let defaults: UserDefaults
+    /// Keychain service for SE wrap-key handles. Distinct from the
+    /// passphrase service ("GnuPG") so handle and passphrase rows never
+    /// collide on `(service, account)`.
+    public static let defaultService = "GnuPG-SEWrap"
 
-    public init(defaults: UserDefaults = .standard) {
-        self.defaults = defaults
+    private let service: String
+    private let useDataProtectionKeychain: Bool
+
+    public init(
+        service: String = SEWrapKeyStore.defaultService,
+        useDataProtectionKeychain: Bool = true
+    ) {
+        self.service = service
+        self.useDataProtectionKeychain = useDataProtectionKeychain
     }
 
     public func loadDataRepresentation(fingerprint: String) -> Data? {
-        defaults.data(forKey: Self.key(for: fingerprint))
+        var query = baseQuery(fingerprint: fingerprint)
+        query[kSecReturnData as String] = kCFBooleanTrue as Any
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        // The handle is SE-encrypted, not ACL-gated; a read must never
+        // block on an auth prompt.
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess,
+              let data = item as? Data,
+              !data.isEmpty
+        else {
+            return nil
+        }
+        return data
     }
 
     public func store(dataRepresentation: Data, fingerprint: String) {
-        defaults.set(dataRepresentation, forKey: Self.key(for: fingerprint))
+        // Upsert: try add, fall back to update on a duplicate.
+        var add = baseQuery(fingerprint: fingerprint)
+        add[kSecValueData as String] = dataRepresentation as CFData
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        let addStatus = SecItemAdd(add as CFDictionary, nil)
+        if addStatus == errSecDuplicateItem {
+            let attrs: [String: Any] = [
+                kSecValueData as String: dataRepresentation as CFData,
+            ]
+            SecItemUpdate(baseQuery(fingerprint: fingerprint) as CFDictionary, attrs as CFDictionary)
+        }
     }
 
     public func remove(fingerprint: String) {
-        defaults.removeObject(forKey: Self.key(for: fingerprint))
+        var query = baseQuery(fingerprint: fingerprint)
+        query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
+        // Idempotent: errSecItemNotFound is not an error.
+        SecItemDelete(query as CFDictionary)
     }
 
-    private static func key(for fingerprint: String) -> String {
-        prefix + fingerprint.lowercased()
+    private func baseQuery(fingerprint: String) -> [String: Any] {
+        var query: [String: Any] = [
+            kSecClass as String:              kSecClassGenericPassword,
+            kSecAttrService as String:        service,
+            kSecAttrAccount as String:        fingerprint.lowercased(),
+            kSecAttrSynchronizable as String: kCFBooleanFalse as Any,
+        ]
+        if useDataProtectionKeychain {
+            query[kSecUseDataProtectionKeychain as String] = kCFBooleanTrue as Any
+        }
+        return query
     }
 }
 
@@ -230,13 +301,21 @@ public enum SecureEnclaveWrap {
         //    SecureBytes owns the memory; `pt` is a view only. CryptoKit
         //    may still copy internally for its own scratch buffer — that
         //    copy is outside our control and is the residual SL-2 risk.
+        //
+        //    SL-5: authenticate the (lowercased) fingerprint as AAD so the
+        //    blob is cryptographically bound to the account it is filed
+        //    under. A blob relocated to a different fingerprint's keychain
+        //    row fails `open` (tag mismatch) instead of decrypting under a
+        //    matching SE key — closing the relocation lever together with
+        //    the keychain-backed handle store (SL-4).
+        let aad = Data(fingerprint.lowercased().utf8)
         let sealed = try passphrase.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> AES.GCM.SealedBox in
             // step-0 above guarantees baseAddress non-nil and count > 0.
             let base = buf.baseAddress!
             do {
                 let mutable = UnsafeMutableRawPointer(mutating: UnsafeRawPointer(base))
                 let pt = Data(bytesNoCopy: mutable, count: buf.count, deallocator: .none)
-                return try AES.GCM.seal(pt, using: aesKey)
+                return try AES.GCM.seal(pt, using: aesKey, authenticating: aad)
             } catch {
                 throw SecureEnclaveWrapError.sealedBoxFailed(String(describing: error))
             }
@@ -305,12 +384,15 @@ public enum SecureEnclaveWrap {
                 authenticationContext: context
             )
         } catch {
-            // dataRepresentation rejected — typically SE re-enrollment
-            // invalidated the key, or the key was produced by a different
-            // SE (Migration Assistant). Surface as authenticationFailed
-            // so the caller cleans up.
-            log.error("SE key load failed; treating as cache miss")
-            throw SecureEnclaveWrapError.authenticationFailed
+            // SL-5: dataRepresentation rejected — corrupt handle bytes, a
+            // key produced by a different SE (Migration Assistant), or SE
+            // re-enrollment that invalidated the handle. This is a
+            // handle-DECODE failure, not a genuine biometric/auth failure,
+            // so it gets its own error case: `unwrapIfNeeded` must NOT
+            // delete the user's real keychain row on this path — it drops
+            // only the regenerable wrap key and re-prompts.
+            log.error("SE key handle decode failed; treating as cache miss")
+            throw SecureEnclaveWrapError.keyHandleDecodeFailed
         }
 
         // 3. ECDH on the SE — THIS is where the biometric prompt fires
@@ -342,9 +424,14 @@ public enum SecureEnclaveWrap {
             throw SecureEnclaveWrapError.malformedBlob
         }
 
+        // SL-5: re-supply the fingerprint AAD the seal bound in. A blob
+        // relocated to a different fingerprint's row fails the tag check
+        // here (the AAD no longer matches) → authenticationFailed → the
+        // caller treats it as a cache miss and re-prompts.
+        let aad = Data(fingerprint.lowercased().utf8)
         var plaintext: Data
         do {
-            plaintext = try AES.GCM.open(sealed, using: aesKey)
+            plaintext = try AES.GCM.open(sealed, using: aesKey, authenticating: aad)
         } catch {
             log.error("AES-GCM open failed; treating as auth failure")
             throw SecureEnclaveWrapError.authenticationFailed

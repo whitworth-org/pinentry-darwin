@@ -31,7 +31,11 @@
 //
 // Lookup tries the data-protection keychain first; if the entry is missing
 // we probe the legacy keychain (where pinentry-mac and pre-H1 builds wrote)
-// and migrate on hit (re-store + legacy delete; best-effort).
+// and serve it READ-ONLY on hit (KC-12). We do NOT promote it into the
+// data-protection/SE store and do NOT delete it: the legacy file keychain
+// is writable by any same-user process, so promoting would launder a
+// planted entry into the trusted store. This matches the documented
+// contract ("Reads existing pinentry-mac Keychain entries … no migration").
 //
 // Ad-hoc-signed binaries (swift run, locally re-signed copies, third-party
 // rebuilds) cannot establish a stable application-identifier and so
@@ -62,6 +66,14 @@ import os
 /// posture (`degradedPostureObserved`) is the authoritative signal and
 /// the UI surfaces it; further log spam adds no value.
 private let entitlementLogFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+/// Sibling of `entitlementLogFlag` for the Secure-Enclave-unavailable
+/// downgrade (FV-2). When the SE is unavailable at store time the
+/// passphrase is filed under only the keychain ACL (no SE wrap); this is
+/// a weaker posture than the SE-wrapped default and the UI / operator
+/// must be able to observe it via `KeychainStore.secureEnclaveDowngradeObserved`.
+/// Monotonic per process; the log fires at most once.
+private let seDowngradeLogFlag = OSAllocatedUnfairLock<Bool>(initialState: false)
 
 private let keychainLogger = Logger(
     subsystem: "org.whitworth.pinentry-darwin",
@@ -105,6 +117,17 @@ public struct KeychainStore: Sendable {
     /// backend. Production Developer-ID builds never trip this.
     public static var degradedPostureObserved: Bool {
         entitlementLogFlag.withLock { $0 }
+    }
+
+    /// Process-wide flag set the first time a `store` falls back to writing
+    /// the passphrase unwrapped because the Secure Enclave was unavailable
+    /// (FV-2). In this posture the keychain ACL is the only confidentiality
+    /// boundary — there is no SE-wrap layer. Mirrors
+    /// `degradedPostureObserved` so the UI can surface a downgrade badge.
+    /// Pre-T2 Intel Macs (no SE) trip this on every save; Apple Silicon and
+    /// T2 Macs never do.
+    public static var secureEnclaveDowngradeObserved: Bool {
+        seDowngradeLogFlag.withLock { $0 }
     }
 
     /// Service name. Production code uses the default "GnuPG" (the value
@@ -169,8 +192,11 @@ public struct KeychainStore: Sendable {
     /// Any other non-zero status throws `.unexpectedStatus`.
     ///
     /// When `useDataProtectionKeychain` is true and a hit comes from the
-    /// legacy backend, migrates the entry to data-protection (re-store +
-    /// legacy delete) before returning. Migration is best-effort.
+    /// legacy backend, the value is served READ-ONLY (KC-12): it is
+    /// returned for use but NOT promoted into the data-protection/SE store
+    /// and NOT deleted. Promoting would launder a same-user-writable legacy
+    /// entry into the trusted store; the documented contract is read
+    /// compatibility, not migration.
     ///
     /// `context`: optional pre-configured `LAContext` carrying a
     /// `SETDESC`-derived `localizedReason`. When non-nil it is passed as
@@ -239,20 +265,32 @@ public struct KeychainStore: Sendable {
             }
             return nil
         }
-        // 2. Migration: when primary is data-protection, also probe legacy
-        //    (which is where pinentry-mac writes and where pre-H1 pinentry-
-        //    darwin builds wrote). On hit, copy forward and delete the
-        //    legacy entry.
+        // 2. Read-only legacy compatibility (KC-12). When primary is
+        //    data-protection, also probe the legacy file-based keychain
+        //    (where pinentry-mac writes and where pre-H1 pinentry-darwin
+        //    builds wrote). On hit, RETURN the value for use but do NOT
+        //    promote it into the data-protection/SE store and do NOT
+        //    delete it.
         //
-        // The legacy probe uses `try?` rather than `try` so any ACL prompt
-        // or auth failure on the legacy backend is swallowed silently. The
+        // The previous behaviour re-`store`d the legacy bytes into the
+        // hardened store and deleted the legacy entry. The legacy
+        // file-based keychain is writable by any same-user process, so a
+        // planted entry got laundered into the trusted store and returned
+        // to gpg-agent as if it had passed the hardened-store ACL. This
+        // contradicted the documented contract ("Reads existing
+        // pinentry-mac Keychain entries … no migration", README:29). We
+        // now honour that contract: legacy entries are read-only
+        // compatibility, never promoted.
+        //
+        // The probe uses `try?` rather than `try` so any ACL prompt or
+        // auth failure on the legacy backend is swallowed silently. The
         // legacy file-based keychain ignores `kSecUseAuthenticationUISkip`
         // and prompts whenever an ACL doesn't recognize the calling app's
         // code identity — exactly the scenario for ad-hoc dev binaries
         // and for entries written by pinentry-mac. A noisy prompt during
         // cache lookup defeats the "fast path" cache promise; silent
-        // failure means "no migrate-able legacy entry, fall through to
-        // the GETPIN dialog."
+        // failure means "no usable legacy entry, fall through to the
+        // GETPIN dialog."
         if useDataProtectionKeychain,
            let legacyBytes = try? rawLookup(
                fingerprint: fingerprint,
@@ -260,33 +298,7 @@ public struct KeychainStore: Sendable {
                context: nil
            )
         {
-            do {
-                try legacyBytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
-                    let secure = SecureBytes(copying: buf)
-                    // KC-10: migrate under the caller's resolved policy
-                    // (which includes any per-fingerprint override from
-                    // KeyPolicyStore). The previous code wrote with
-                    // `defaultPolicy` and silently downgraded strict ACLs
-                    // (.biometryCurrentSet → .userPresence) on the first
-                    // legacy hit.
-                    try store(
-                        fingerprint: fingerprint,
-                        label: nil,
-                        passphrase: secure,
-                        policy: resolvedPolicy
-                    )
-                }
-                // Only delete the legacy entry if the data-protection write
-                // succeeded; otherwise we'd lose the user's cached
-                // passphrase entirely.
-                try? rawClear(fingerprint: fingerprint, dataProtection: false)
-            } catch KeychainStoreError.degradedNoEntitlement {
-                // Migration from legacy needs a DP write; without
-                // entitlement the legacy entry stays put. Posture log
-                // already emitted by rawStore.
-            } catch {
-                // Migration failed but the value is still good — return it.
-            }
+            keychainLogger.info("served read-only legacy keychain entry; not promoted to data-protection store")
             return legacyBytes
         }
         return nil
@@ -335,6 +347,19 @@ public struct KeychainStore: Sendable {
                     store: seWrapStore
                 )
             }
+        } catch SecureEnclaveWrapError.keyHandleDecodeFailed {
+            // SL-5: the wrap-key HANDLE was rejected by the SE
+            // (corrupt bytes, foreign-SE handle, re-enrollment). The
+            // user's real keychain row is intact and may still be
+            // recoverable once a fresh wrap key is generated on the next
+            // store. Drop ONLY the regenerable wrap key — do NOT delete
+            // the keychain row (the prior code path deleted the row,
+            // destroying a still-good cached entry on a handle-decode
+            // miss). Return nil so the next GETPIN re-prompts; the
+            // subsequent store re-wraps under a fresh handle.
+            keychainLogger.error("SE wrap-key handle decode failed; dropping wrap key only, keychain row preserved")
+            SecureEnclaveWrap.deleteWrapKey(fingerprint: fingerprint, store: seWrapStore)
+            return nil
         } catch SecureEnclaveWrapError.authenticationFailed,
                 SecureEnclaveWrapError.missingWrapKey,
                 SecureEnclaveWrapError.malformedBlob,
@@ -400,9 +425,14 @@ public struct KeychainStore: Sendable {
                 return
             } catch SecureEnclaveWrapError.enclaveUnavailable {
                 // Race: isAvailable returned true but generation failed.
-                // Fall through to legacy storage.
-                keychainLogger.error("SE wrap unavailable at write; storing unwrapped")
+                // Fall through to legacy storage and surface the downgrade.
+                recordSecureEnclaveDowngrade(reason: "enclave unavailable at write")
             }
+        } else if useSecureEnclaveWrap {
+            // SE wrap requested but the chip is absent (pre-T2 Intel).
+            // FV-2: this is a silent confidentiality downgrade — record
+            // it so the UI / operator can observe the weaker posture.
+            recordSecureEnclaveDowngrade(reason: "Secure Enclave not present on this host")
         }
         try rawStore(
             fingerprint: fingerprint,
@@ -879,6 +909,26 @@ public struct KeychainStore: Sendable {
                 ad-hoc-signed builds). Degraded posture: cached writes are \
                 disabled, only legacy reads continue. UI should surface this \
                 via KeychainStore.degradedPostureObserved.
+                """)
+        }
+    }
+
+    /// Set the process-wide SE-downgrade flag and emit a single os_log
+    /// line on first occurrence (FV-2). Mirrors `recordDegradedPosture`.
+    /// Subsequent calls are silent — the UI reads
+    /// `KeychainStore.secureEnclaveDowngradeObserved`.
+    private func recordSecureEnclaveDowngrade(reason: String) {
+        let firstTime = seDowngradeLogFlag.withLock { state -> Bool in
+            let was = state
+            state = true
+            return !was
+        }
+        if firstTime {
+            keychainLogger.error("""
+                Storing passphrase WITHOUT Secure-Enclave wrap: \(reason, privacy: .public). \
+                The keychain ACL is now the only confidentiality boundary for \
+                this entry. UI should surface this via \
+                KeychainStore.secureEnclaveDowngradeObserved.
                 """)
         }
     }
