@@ -236,12 +236,24 @@ extension Command {
         }
     }
 
+    /// Upper bound on an accepted SETTIMEOUT value, in seconds (24h).
+    /// SECURITY (AS-4): `Int(trimmed)` accepts the full Int domain, so a
+    /// hostile gpg-agent sending `SETTIMEOUT 9223372036854775807` would
+    /// produce a `TimeInterval` so large the auto-dismiss `Timer` never
+    /// fires, pinning the prompt up indefinitely. Clamp at parse time to a
+    /// sane domain: negatives collapse to 0 (no timeout — existing
+    /// semantics) and anything above the ceiling is capped to it.
+    static let maxTimeoutSeconds = 86400
     private static func parseSetTimeout(_ args: String) throws -> Command {
         let trimmed = args.trimmingCharacters(in: .whitespaces)
         guard let n = Int(trimmed) else {
             throw CommandParseError.malformed("SETTIMEOUT requires an integer")
         }
-        return .setTimeout(n)
+        // AS-4: clamp to [0, maxTimeoutSeconds]. Negative → 0 keeps the
+        // upstream "no timeout" meaning; the ceiling defends against the
+        // never-firing-Timer DoS.
+        let clamped = Swift.max(0, Swift.min(n, Self.maxTimeoutSeconds))
+        return .setTimeout(clamped)
     }
 
     private static func parseConfirm(_ args: String) -> Command {

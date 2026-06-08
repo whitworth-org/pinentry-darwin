@@ -149,6 +149,39 @@ final class CommandParsingTests: XCTestCase {
         XCTAssertThrowsError(try Command.parse("SETTIMEOUT notanumber"))
     }
 
+    // MARK: - SETTIMEOUT clamping (AS-4 regression)
+
+    func testSetTimeoutClampsHugeValueToCeiling() throws {
+        // Int.max would produce a TimeInterval so large the auto-dismiss
+        // Timer never fires, leaving the prompt up indefinitely. Must clamp.
+        let parsed = try Command.parse("SETTIMEOUT 9223372036854775807")
+        XCTAssertEqual(parsed, .setTimeout(Command.maxTimeoutSeconds))
+    }
+
+    func testSetTimeoutClampsAboveCeiling() throws {
+        // One second over the 24h ceiling clamps to the ceiling.
+        let parsed = try Command.parse("SETTIMEOUT \(Command.maxTimeoutSeconds + 1)")
+        XCTAssertEqual(parsed, .setTimeout(Command.maxTimeoutSeconds))
+    }
+
+    func testSetTimeoutAtCeilingPassesThrough() throws {
+        let parsed = try Command.parse("SETTIMEOUT \(Command.maxTimeoutSeconds)")
+        XCTAssertEqual(parsed, .setTimeout(Command.maxTimeoutSeconds))
+    }
+
+    func testSetTimeoutNegativeClampsToZero() throws {
+        // Negatives mean "no timeout" — clamp to 0 (existing semantics).
+        XCTAssertEqual(try Command.parse("SETTIMEOUT -1"), .setTimeout(0))
+        XCTAssertEqual(try Command.parse("SETTIMEOUT -9223372036854775808"),
+                       .setTimeout(0))
+    }
+
+    func testSetTimeoutNormalValuePassesThrough() throws {
+        XCTAssertEqual(try Command.parse("SETTIMEOUT 0"), .setTimeout(0))
+        XCTAssertEqual(try Command.parse("SETTIMEOUT 60"), .setTimeout(60))
+        XCTAssertEqual(try Command.parse("SETTIMEOUT 3600"), .setTimeout(3600))
+    }
+
     func testSetQualityBarOptionalArg() throws {
         XCTAssertEqual(try Command.parse("SETQUALITYBAR"), .setQualityBar(nil))
         XCTAssertEqual(try Command.parse("SETQUALITYBAR Quality"),
