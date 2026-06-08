@@ -52,9 +52,10 @@ final class PinentryWindowTests: XCTestCase {
     // not surface `worksWhenModal` or `becomesKeyOnlyIfNeeded` in a
     // semantically meaningful way.
     func testIsNSPanelSubclass() {
-        let win = PinentryWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 200))
-        XCTAssertTrue(win is NSPanel,
-                      "PinentryWindow must be an NSPanel for modal-tolerant behaviour")
+        XCTAssertTrue(
+            PinentryWindow.isSubclass(of: NSPanel.self),
+            "PinentryWindow must be an NSPanel for modal-tolerant behaviour"
+        )
     }
 
     // becomesKeyOnlyIfNeeded = false ensures the panel takes key status

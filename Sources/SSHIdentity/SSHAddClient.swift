@@ -65,7 +65,7 @@ public actor SSHAddClient: SSHAddClientProtocol {
             stdin: nil
         )
         guard result.didSucceed else {
-            log.error("ssh-add -K exit=\(result.exitCode, privacy: .public) stderr=\(result.stderr, privacy: .public)")
+            log.error("ssh-add -K exit=\(result.exitCode, privacy: .public) stderr=\(result.stderr, privacy: .private)")
             throw SSHAddError.commandFailed(
                 exitCode: result.exitCode,
                 stderr: result.stderr
@@ -92,7 +92,7 @@ public actor SSHAddClient: SSHAddClientProtocol {
             return []
         }
         guard result.didSucceed else {
-            log.error("ssh-add -L exit=\(result.exitCode, privacy: .public) stderr=\(result.stderr, privacy: .public)")
+            log.error("ssh-add -L exit=\(result.exitCode, privacy: .public) stderr=\(result.stderr, privacy: .private)")
             throw SSHAddError.commandFailed(
                 exitCode: result.exitCode,
                 stderr: result.stderr

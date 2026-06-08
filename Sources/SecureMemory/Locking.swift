@@ -99,7 +99,7 @@ func secureMunmap(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
 /// repeated lookups don't pay the syscall cost.
 private let strictMlockMode: Bool = {
     if let v = getenv("PINENTRY_DARWIN_REQUIRE_MLOCK"),
-       let s = String(validatingUTF8: v) {
+       let s = String(validatingCString: v) {
         return s == "1" || s.lowercased() == "true" || s.lowercased() == "yes"
     }
     return false

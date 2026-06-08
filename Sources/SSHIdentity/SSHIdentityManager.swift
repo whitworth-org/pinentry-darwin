@@ -108,7 +108,7 @@ public final class SSHIdentityManager: ObservableObject {
             onSuccess(value)
         } catch {
             let message = formatError(error)
-            log.error("ssh manager error: \(message, privacy: .public)")
+            log.error("ssh manager error: \(message, privacy: .private)")
             lastError = message
         }
     }

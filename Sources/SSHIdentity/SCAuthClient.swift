@@ -186,7 +186,7 @@ public actor SCAuthClient: SCAuthClientProtocol {
 
     private func requireSuccess(_ result: ProcessResult) throws {
         guard result.didSucceed else {
-            log.error("sc_auth exit=\(result.exitCode, privacy: .public) stderr=\(result.stderr, privacy: .public)")
+            log.error("sc_auth exit=\(result.exitCode, privacy: .public) stderr=\(result.stderr, privacy: .private)")
             throw SCAuthError.commandFailed(
                 exitCode: result.exitCode,
                 stderr: result.stderr
