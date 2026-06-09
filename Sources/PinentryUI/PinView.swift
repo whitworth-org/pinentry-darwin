@@ -113,6 +113,30 @@ public struct PinView: View {
                 SecureInput.disable()
                 skeActive = false
             }
+
+            // L-3(b): clear the SwiftUI text-storage scratch on every
+            // resolution path. The window always closes on resolve (OK,
+            // cancel, close, timeout) which fires onDisappear, so this is
+            // the single choke point that covers all four. This only
+            // shortens the residue window — the prior per-keystroke String
+            // copies SwiftUI made are already unwipeable; that residual is
+            // documented in PinViewModel and accepted for v1.0.0.
+            pinText = ""
+            repeatText = ""
+
+            // L-5: clear the pasteboard on the abandonment paths too —
+            // cancel, red-X close, and timeout never route through
+            // handleSubmit(), so a paste-filled passphrase would otherwise
+            // linger on NSPasteboard.general after the dialog is gone.
+            // Gated on the SAME clearPasteboardOnSubmit opt-in and the same
+            // changeCount baseline as the submit path; idempotent, so the
+            // OK path (which already cleared in handleSubmit) is unharmed.
+            // We never read pasteboard contents — only whether the count
+            // advanced during the dialog's lifetime.
+            PasteboardGuard.clearIfAdvanced(
+                since: pasteboardBaseline,
+                enabled: clearPasteboardOnSubmit
+            )
         }
     }
 

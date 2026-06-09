@@ -126,6 +126,19 @@ public final class PinentryWindow: NSPanel {
         sharingType = .none
         collectionBehavior = [.transient, .ignoresCycle]
 
+        // I-6: opt out of window state restoration. A restorable window
+        // lets AppKit persist an encoded snapshot of the window (and its
+        // restoration class) to the per-user saved-application-state
+        // store on disk, and can capture a window-image snapshot during
+        // the save. For a passphrase prompt that means dialog state /
+        // contents could be serialised under ~/Library/Saved Application
+        // State. pinentry dialogs are single-shot and never want to be
+        // restored on relaunch, so we disable restoration outright. This
+        // is the notarization-safe NSWindow/NSPanel opt-out; it composes
+        // with `sharingType = .none` above (which blocks live snapshot
+        // capture by the WindowServer).
+        isRestorable = false
+
         // NSPanel-specific behaviours (no-ops on plain NSWindow):
         //   becomesKeyOnlyIfNeeded = false → the panel takes key status
         //     the moment it appears, so the secure field receives the

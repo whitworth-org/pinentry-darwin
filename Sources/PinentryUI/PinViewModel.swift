@@ -122,26 +122,48 @@ public final class PinViewModel {
     // MARK: - Resolution
 
     /// Hand ownership of `pin` to the coordinator.
+    ///
+    /// CRITICAL: we do NOT wipe `pin` here. The egress buffer is consumed
+    /// downstream — `AssuanLoop.handleGetPin` writes it to the wire (and
+    /// optionally stores it) AFTER `coordinator.present` returns. Zeroing
+    /// it here would hand the consumer an empty buffer. The egress `pin`
+    /// is wiped by the consumer immediately after that final write; we
+    /// wipe the never-egressed `repeatPin` here since nothing downstream
+    /// reads it.
     public func submit() {
         guard !isSubmitting else { return }
         isSubmitting = true
+        repeatPin.reset()
         deliver(.pin(pin, savedToKeychain: saveToKeychain))
     }
 
     public func cancel() {
+        wipe()
         deliver(.canceled)
     }
 
     public func notConfirmed() {
+        wipe()
         deliver(.notConfirmed)
     }
 
     public func windowClosed() {
+        wipe()
         deliver(.windowClosed)
     }
 
     public func timedOut() {
+        wipe()
         deliver(.timedOut)
+    }
+
+    /// Deterministically zero both passphrase buffers. Called on every
+    /// non-egress terminal path (cancel / close / timeout). On the submit
+    /// path the egress `pin` is NOT wiped here — its consumer owns the
+    /// deterministic wipe after the wire write (see `submit()`).
+    public func wipe() {
+        pin.reset()
+        repeatPin.reset()
     }
 
     private func deliver(_ result: DialogResult) {

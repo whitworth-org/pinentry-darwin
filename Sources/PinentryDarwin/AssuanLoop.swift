@@ -410,6 +410,14 @@ final class AssuanLoop {
             }
             await reply(.ok)
 
+            // L-3: deterministically zero the egress buffer now that the
+            // wire write (and any keychain store above) have consumed it.
+            // The view-model deliberately does NOT wipe `pin` on submit —
+            // it is consumed here, after `coordinator.present` returns — so
+            // this is the correct and only safe place to reset it. After
+            // this point `secure` is empty; nothing downstream reads it.
+            secure.reset()
+
         case .canceled:
             await reply(.err(code: AssuanError.canceled,
                              message: "Operation cancelled"))
