@@ -129,6 +129,46 @@ final class SessionTests: XCTestCase {
         await session.close()
     }
 
+    // MARK: Session-lifetime command cap (AS-5)
+
+    /// A peer streaming unlimited valid commands must not be able to pin the
+    /// process forever: after `maxCommandsPerSession` parsed commands,
+    /// `nextCommand()` throws `commandLimitExceeded`. Driven from a temp
+    /// file (not a pipe) so the cap-count of small lines doesn't deadlock on
+    /// the ~64 KiB pipe buffer.
+    func testCommandCountCapIsEnforced() async throws {
+        let cap = Session.maxCommandsPerSession
+
+        // Build cap+1 "RESET\n" lines into a temp file.
+        let tmp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("assuan-cap-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let line = Data("RESET\n".utf8)
+        var blob = Data(capacity: line.count * (cap + 1))
+        for _ in 0..<(cap + 1) { blob.append(line) }
+        try blob.write(to: tmp)
+
+        let input = try FileHandle(forReadingFrom: tmp)
+        let output = FileHandle.nullDevice
+        let session = Session(input: input, output: output)
+        defer { Task { await session.close() } }
+
+        // The first `cap` calls succeed.
+        for _ in 0..<cap {
+            let cmd = try await session.nextCommand()
+            XCTAssertEqual(cmd, .reset)
+        }
+
+        // The next call must throw the cap error, even though a valid
+        // RESET line is still waiting in the buffer.
+        do {
+            _ = try await session.nextCommand()
+            XCTFail("expected commandLimitExceeded after the cap")
+        } catch SessionError.commandLimitExceeded {
+            // expected
+        }
+    }
+
     // MARK: ERR encoding
 
     func testSendErr() async throws {

@@ -21,6 +21,10 @@ public enum SessionError: Error {
     case malformedLine(String)
     case unexpectedResponse(String)
     case ioError(errno: Int32)
+    /// AS-5: the per-session command cap was exceeded; the read loop must
+    /// terminate so a peer cannot pin the process at 100% CPU by streaming
+    /// unlimited valid commands.
+    case commandLimitExceeded
 }
 
 // MARK: - Session
@@ -38,6 +42,10 @@ public actor Session {
 
     /// Set once `close()` has been called. Subsequent reads return EOF.
     private var isClosed: Bool = false
+
+    /// Count of commands parsed and returned over the session's lifetime.
+    /// Compared against `maxCommandsPerSession` (AS-5) to bound CPU.
+    private var commandCount: Int = 0
 
     // MARK: Init
 
@@ -62,6 +70,13 @@ public actor Session {
     /// return it. On EOF the actor returns `.bye` so the caller's loop
     /// terminates cleanly without raising.
     public func nextCommand() async throws -> Command {
+        // AS-5: enforce the session-lifetime command cap before reading the
+        // next line so a peer streaming unlimited valid commands cannot pin
+        // the process at 100% CPU. Counts only lines that parse to a real
+        // command (blank/comment lines are skipped below and don't count).
+        if commandCount >= Self.maxCommandsPerSession {
+            throw SessionError.commandLimitExceeded
+        }
         // Skip blank/comment lines: per Assuan, lines starting with '#' are
         // comments and empty lines are tolerated.
         while true {
@@ -71,7 +86,9 @@ public actor Session {
             if line.isEmpty { continue }
             if line.first == "#" { continue }
             do {
-                return try Command.parse(line)
+                let command = try Command.parse(line)
+                commandCount += 1
+                return command
             } catch let e as CommandParseError {
                 throw SessionError.malformedLine("\(e)")
             }
@@ -109,6 +126,14 @@ public actor Session {
     /// stream `D 0\n` forever and freeze the keystroke-driven quality
     /// path inside a synchronous send-and-wait.
     private static let maxQualityReplyLines = 32
+
+    /// Session-lifetime command cap (AS-5). Session already bounds per-line
+    /// and total-buffer memory, but a peer can stream unlimited valid small
+    /// commands to pin one process at 100% CPU. After this many commands
+    /// `nextCommand()` throws so the read loop terminates. Set far above any
+    /// legitimate session: real pinentry transcripts are a handful of
+    /// SET*/GETPIN/BYE lines.
+    static let maxCommandsPerSession = 100_000
 
     /// Send `INQUIRE QUALITY <escaped-bytes>` and read back the response.
     /// Returns the integer carried on the resulting `D` line, clamped to
