@@ -44,20 +44,59 @@ final class SecureEnclaveWrapTests: XCTestCase {
         XCTAssertTrue(SecureEnclaveWrap.isWrapped(Data([0x01, 0x04, 0xAA, 0xBB])))
     }
 
-    // MARK: - SEWrapKeyStore persistence
+    // MARK: - SL-5: handle-decode failure is a distinct error case
 
-    private func ephemeralStore() -> (SEWrapKeyStore, UserDefaults) {
-        let suite = "pinentry-darwin-se-test-\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suite) else {
-            fatalError("could not create ephemeral UserDefaults")
-        }
-        return (SEWrapKeyStore(defaults: defaults), defaults)
+    /// `keyHandleDecodeFailed` must be a value distinct from
+    /// `authenticationFailed` so the keychain layer can tell a corrupt
+    /// handle (drop only the wrap key) from a genuine auth failure (delete
+    /// the row). This guards the Equatable contract the catch-site relies
+    /// on; it needs no SE hardware.
+    func testHandleDecodeErrorIsDistinctFromAuthFailure() {
+        XCTAssertNotEqual(
+            SecureEnclaveWrapError.keyHandleDecodeFailed,
+            SecureEnclaveWrapError.authenticationFailed
+        )
+        XCTAssertEqual(
+            SecureEnclaveWrapError.keyHandleDecodeFailed,
+            SecureEnclaveWrapError.keyHandleDecodeFailed
+        )
     }
 
-    func testStoreLoadRoundTrip() {
-        let (store, _) = ephemeralStore()
+    // MARK: - SEWrapKeyStore persistence (keychain-backed, SL-4)
+    //
+    // The wrap-key handle now lives in the data-protection keychain rather
+    // than UserDefaults (SL-4: UserDefaults is same-user-enumerable). These
+    // round-trips therefore touch the real keychain and are gated behind
+    // PINENTRY_DARWIN_RUN_KEYCHAIN_TESTS=1, like KeychainStoreTests. Each
+    // uses a unique service name and the legacy backend (the swift-test
+    // binary is ad-hoc-signed and cannot use the data-protection backend).
+
+    private static var keychainTestsEnabled: Bool {
+        ProcessInfo.processInfo.environment["PINENTRY_DARWIN_RUN_KEYCHAIN_TESTS"] == "1"
+    }
+
+    private func skipIfKeychainDisabled() throws {
+        if !Self.keychainTestsEnabled {
+            throw XCTSkip("set PINENTRY_DARWIN_RUN_KEYCHAIN_TESTS=1 to run keychain-backed handle-store tests")
+        }
+    }
+
+    /// A keychain-backed handle store on a unique service so it cannot
+    /// observe or disturb real GnuPG-SEWrap rows, on the legacy backend so
+    /// an ad-hoc-signed test binary does not hit errSecMissingEntitlement.
+    private func keychainHandleStore() -> SEWrapKeyStore {
+        SEWrapKeyStore(
+            service: "GnuPG-SEWrap-test-\(UUID().uuidString)",
+            useDataProtectionKeychain: false
+        )
+    }
+
+    func testStoreLoadRoundTrip() throws {
+        try skipIfKeychainDisabled()
+        let store = keychainHandleStore()
         let fpr = "ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD"
         let payload = Data([0xCA, 0xFE, 0xBA, 0xBE])
+        defer { store.remove(fingerprint: fpr) }
 
         XCTAssertNil(store.loadDataRepresentation(fingerprint: fpr))
 
@@ -65,18 +104,34 @@ final class SecureEnclaveWrapTests: XCTestCase {
         XCTAssertEqual(store.loadDataRepresentation(fingerprint: fpr), payload)
     }
 
-    func testRemoveDeletesEntry() {
-        let (store, _) = ephemeralStore()
+    func testStoreOverwritesExistingHandle() throws {
+        try skipIfKeychainDisabled()
+        let store = keychainHandleStore()
+        let fpr = "ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD"
+        defer { store.remove(fingerprint: fpr) }
+
+        store.store(dataRepresentation: Data([0x01, 0x02]), fingerprint: fpr)
+        store.store(dataRepresentation: Data([0x03, 0x04, 0x05]), fingerprint: fpr)
+        XCTAssertEqual(store.loadDataRepresentation(fingerprint: fpr), Data([0x03, 0x04, 0x05]))
+    }
+
+    func testRemoveDeletesEntry() throws {
+        try skipIfKeychainDisabled()
+        let store = keychainHandleStore()
         let fpr = "ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD"
         store.store(dataRepresentation: Data([0xAA]), fingerprint: fpr)
         store.remove(fingerprint: fpr)
         XCTAssertNil(store.loadDataRepresentation(fingerprint: fpr))
+        // Idempotent: a second remove must not throw.
+        XCTAssertNoThrow(store.remove(fingerprint: fpr))
     }
 
-    func testKeyLookupIsCaseInsensitive() {
-        let (store, _) = ephemeralStore()
+    func testKeyLookupIsCaseInsensitive() throws {
+        try skipIfKeychainDisabled()
+        let store = keychainHandleStore()
         let lower = "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"
         let upper = lower.uppercased()
+        defer { store.remove(fingerprint: lower) }
         store.store(dataRepresentation: Data([0xAA]), fingerprint: lower)
         XCTAssertEqual(store.loadDataRepresentation(fingerprint: upper), Data([0xAA]))
     }
@@ -86,7 +141,7 @@ final class SecureEnclaveWrapTests: XCTestCase {
     @MainActor
     func testUnwrapRejectsShortBlob() throws {
         try skipIfNoSE()
-        let (store, _) = ephemeralStore()
+        let store = keychainHandleStore()
         let context = LAContext()
         do {
             _ = try SecureEnclaveWrap.unwrap(
@@ -104,7 +159,7 @@ final class SecureEnclaveWrapTests: XCTestCase {
     @MainActor
     func testUnwrapRejectsBadVersion() throws {
         try skipIfNoSE()
-        let (store, _) = ephemeralStore()
+        let store = keychainHandleStore()
         let context = LAContext()
         // version 0x02 followed by 100 bytes of padding — long enough to
         // pass the minimum-length gate (1 + 65 + 28 = 94 bytes) so we
@@ -127,7 +182,7 @@ final class SecureEnclaveWrapTests: XCTestCase {
     @MainActor
     func testUnwrapRejectsBadX963Marker() throws {
         try skipIfNoSE()
-        let (store, _) = ephemeralStore()
+        let store = keychainHandleStore()
         let context = LAContext()
         // Version is right (0x01) but the pubkey byte at offset 1 is
         // not 0x04. Pad to >= minimum length.
@@ -153,7 +208,7 @@ final class SecureEnclaveWrapTests: XCTestCase {
         // developer machines do not silently consume SE key slots when
         // running the suite without intent.
         try skipUnlessSERunEnabled()
-        let (store, _) = ephemeralStore()
+        let store = keychainHandleStore()
         // Wrap a payload so we have a valid blob, but then forget the
         // SE key so unwrap finds the metadata is gone.
         let fpr = "missing-key-test"
@@ -187,7 +242,7 @@ final class SecureEnclaveWrapTests: XCTestCase {
     @MainActor
     func testWrapUnwrapRoundTrip() throws {
         try skipUnlessSERunEnabled()
-        let (store, _) = ephemeralStore()
+        let store = keychainHandleStore()
         let fpr = "round-trip-\(UUID().uuidString)"
         let plaintext = "correct horse battery staple"
         let payload = bytesOf(plaintext)
@@ -216,7 +271,7 @@ final class SecureEnclaveWrapTests: XCTestCase {
     @MainActor
     func testReWrapProducesDifferentBlobsButSamePlaintext() throws {
         try skipUnlessSERunEnabled()
-        let (store, _) = ephemeralStore()
+        let store = keychainHandleStore()
         let fpr = "re-wrap-\(UUID().uuidString)"
         let plaintext = "secret"
         let payload = bytesOf(plaintext)
@@ -245,6 +300,87 @@ final class SecureEnclaveWrapTests: XCTestCase {
         XCTAssertEqual(byteArray(of: u2), Array(plaintext.utf8))
 
         SecureEnclaveWrap.deleteWrapKey(fingerprint: fpr, store: store)
+    }
+
+    // MARK: - SL-5: AAD binds the blob to its fingerprint
+
+    /// A blob sealed under fingerprint A must NOT open under fingerprint B,
+    /// even when B's keychain row holds A's wrap-key handle (the relocation
+    /// attack). With the fingerprint authenticated as AES-GCM AAD the tag
+    /// check fails and unwrap reports `authenticationFailed`, which the
+    /// caller treats as a cache miss.
+    @MainActor
+    func testUnwrapWithDifferentFingerprintFailsAuth() throws {
+        try skipUnlessSERunEnabled()
+        let store = keychainHandleStore()
+        let fprA = "aaaa-\(UUID().uuidString)"
+        let fprB = "bbbb-\(UUID().uuidString)"
+        let plaintext = "correct horse battery staple"
+        let payload = bytesOf(plaintext)
+        let policy = KeyPolicy(biometry: .userPresence)
+        defer {
+            SecureEnclaveWrap.deleteWrapKey(fingerprint: fprA, store: store)
+            SecureEnclaveWrap.deleteWrapKey(fingerprint: fprB, store: store)
+        }
+
+        // Seal under A, then relocate A's handle into B's slot so the SE
+        // ECDH and HKDF steps succeed — only the AAD differs.
+        let blob = try SecureEnclaveWrap.wrap(
+            passphrase: payload, fingerprint: fprA, policy: policy, store: store
+        )
+        guard let aHandle = store.loadDataRepresentation(fingerprint: fprA) else {
+            return XCTFail("expected a stored handle for fingerprint A")
+        }
+        store.store(dataRepresentation: aHandle, fingerprint: fprB)
+
+        let context = LAContext()
+        // Sanity: A still round-trips with its own AAD.
+        let okA = try SecureEnclaveWrap.unwrap(
+            blob: blob, fingerprint: fprA, context: context, store: store
+        )
+        XCTAssertEqual(byteArray(of: okA), Array(plaintext.utf8))
+
+        // The relocated blob must NOT decrypt under B — AAD mismatch.
+        do {
+            _ = try SecureEnclaveWrap.unwrap(
+                blob: blob, fingerprint: fprB, context: context, store: store
+            )
+            XCTFail("expected authenticationFailed: AAD must bind blob to fingerprint")
+        } catch SecureEnclaveWrapError.authenticationFailed {
+            // expected
+        }
+    }
+
+    // MARK: - SL-5: corrupt wrap-key handle is a decode failure, not auth
+
+    /// A handle whose bytes are corrupt must surface as
+    /// `keyHandleDecodeFailed` (so the caller drops only the regenerable
+    /// wrap key) rather than `authenticationFailed` (which would delete the
+    /// user's real keychain row).
+    @MainActor
+    func testUnwrapWithCorruptHandleReportsDecodeFailure() throws {
+        try skipUnlessSERunEnabled()
+        let store = keychainHandleStore()
+        let fpr = "corrupt-\(UUID().uuidString)"
+        let policy = KeyPolicy(biometry: .userPresence)
+        defer { SecureEnclaveWrap.deleteWrapKey(fingerprint: fpr, store: store) }
+
+        let blob = try SecureEnclaveWrap.wrap(
+            passphrase: bytesOf("hunter2"), fingerprint: fpr, policy: policy, store: store
+        )
+        // Overwrite the stored handle with garbage that the SE will reject
+        // at PrivateKey(dataRepresentation:) decode time.
+        store.store(dataRepresentation: Data(repeating: 0xFF, count: 32), fingerprint: fpr)
+
+        let context = LAContext()
+        do {
+            _ = try SecureEnclaveWrap.unwrap(
+                blob: blob, fingerprint: fpr, context: context, store: store
+            )
+            XCTFail("expected keyHandleDecodeFailed")
+        } catch SecureEnclaveWrapError.keyHandleDecodeFailed {
+            // expected — distinct from authenticationFailed.
+        }
     }
 
     // MARK: - Helpers
