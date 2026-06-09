@@ -170,20 +170,15 @@ final class OutputParsersTests: XCTestCase {
         XCTAssertEqual(keys[1].keyType, "ssh-ed25519")
     }
 
-    // MARK: - ssh-add -K
-
-    func testSSHAddRegistrationExtractsFingerprints() {
-        let out = """
-        Resident identity added: ECDSA-SK SHA256:vs4ByYo+T9M3V8iiDYONMSvx2k5Fj2ujVBWt1j6yzis
-        """
-        XCTAssertEqual(
-            parseSSHAddRegistration(out),
-            ["SHA256:vs4ByYo+T9M3V8iiDYONMSvx2k5Fj2ujVBWt1j6yzis"]
-        )
-    }
-
-    func testSSHAddRegistrationEmpty() {
-        XCTAssertEqual(parseSSHAddRegistration(""), [])
+    // L-9: a key whose comment merely contains the empty-agent sentinel
+    // must still parse. Only a whole-line match for the sentinel is the
+    // empty-agent marker.
+    func testSSHAddListKeepsKeyWithSentinelInComment() {
+        let line = "ssh-ed25519 AAAA333 the agent has no identities"
+        let keys = parseSSHAddList(line + "\n")
+        XCTAssertEqual(keys.count, 1)
+        XCTAssertEqual(keys[0].keyType, "ssh-ed25519")
+        XCTAssertEqual(keys[0].comment, "the agent has no identities")
     }
 
     // MARK: - Validation

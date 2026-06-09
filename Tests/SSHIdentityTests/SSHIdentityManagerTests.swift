@@ -13,20 +13,26 @@ import XCTest
 
 actor FakeSCAuth: SCAuthClientProtocol {
     var identities: [CTKIdentity] = []
+    var partial: CTKIdentityListing.PartialReason?
     var nextError: SCAuthError?
     var createCalls: [String] = []
     var deleteCalls: [String] = []
 
-    init(identities: [CTKIdentity] = []) {
+    init(
+        identities: [CTKIdentity] = [],
+        partial: CTKIdentityListing.PartialReason? = nil
+    ) {
         self.identities = identities
+        self.partial = partial
     }
 
     func setError(_ error: SCAuthError?) { nextError = error }
     func setIdentities(_ rows: [CTKIdentity]) { identities = rows }
+    func setPartial(_ reason: CTKIdentityListing.PartialReason?) { partial = reason }
 
-    func listIdentities() async throws -> [CTKIdentity] {
+    func listIdentities() async throws -> CTKIdentityListing {
         if let err = nextError { nextError = nil; throw err }
-        return identities
+        return CTKIdentityListing(identities: identities, partial: partial)
     }
 
     func createIdentity(label: String) async throws {
@@ -63,7 +69,7 @@ actor FakeSSHAdd: SSHAddClientProtocol {
 
     func setError(_ error: SSHAddError?) { nextError = error }
 
-    func registerSecurityKeyProvider() async throws -> [String] {
+    func registerSecurityKeyProvider() async throws {
         if let err = nextError { nextError = nil; throw err }
         agentKeys.append(SSHAgentKey(
             keyType: "sk-ecdsa-sha2-nistp256@openssh.com",
@@ -72,7 +78,6 @@ actor FakeSSHAdd: SSHAddClientProtocol {
             rawLine: "sk-ecdsa-sha2-nistp256@openssh.com AAAA ssh:registered"
         ))
         registeredFingerprints.append("SHA256:fake")
-        return ["SHA256:fake"]
     }
 
     func listAgentIdentities() async throws -> [SSHAgentKey] {
@@ -112,7 +117,54 @@ final class SSHIdentityManagerTests: XCTestCase {
         XCTAssertEqual(manager.identities.count, 1)
         XCTAssertEqual(manager.agentKeys.count, 1)
         XCTAssertNil(manager.lastError)
+        XCTAssertNil(manager.lastWarning)
         XCTAssertFalse(manager.isBusy)
+    }
+
+    // L-10: a partial (truncated) sc_auth listing surfaces a non-fatal
+    // warning while still populating the usable list — not a thrown
+    // error, and not silent truncation.
+    func testRefreshSurfacesPartialListingAsWarning() async {
+        let row = CTKIdentity(
+            keyType: .p256NE,
+            publicKeyHash: String(repeating: "D", count: 40),
+            sshFingerprint: nil,
+            protection: .bio,
+            label: "ssh-x",
+            commonName: "ssh-x",
+            emailAddress: "",
+            validToRaw: "",
+            isValid: true
+        )
+        let scAuth = FakeSCAuth(
+            identities: [row],
+            partial: .fingerprintCountMismatch(hexRows: 1, sshRows: 0)
+        )
+        let manager = SSHIdentityManager(scAuth: scAuth, sshAdd: FakeSSHAdd())
+
+        await manager.refresh()
+        XCTAssertEqual(manager.identities.count, 1)
+        XCTAssertNil(manager.lastError)
+        XCTAssertNotNil(manager.lastWarning)
+        XCTAssertTrue(manager.lastWarning?.contains("could not be paired") ?? false)
+
+        manager.dismissWarning()
+        XCTAssertNil(manager.lastWarning)
+    }
+
+    // A subsequent clean refresh clears a stale partial warning.
+    func testCleanRefreshClearsStaleWarning() async {
+        let scAuth = FakeSCAuth(
+            identities: [],
+            partial: .fingerprintCountMismatch(hexRows: 1, sshRows: 0)
+        )
+        let manager = SSHIdentityManager(scAuth: scAuth, sshAdd: FakeSSHAdd())
+        await manager.refresh()
+        XCTAssertNotNil(manager.lastWarning)
+
+        await scAuth.setPartial(nil)
+        await manager.refresh()
+        XCTAssertNil(manager.lastWarning)
     }
 
     func testRefreshSurfacesErrorAsLastError() async {

@@ -21,7 +21,7 @@ private let log = Logger(
 // MARK: - Protocol
 
 public protocol SSHAddClientProtocol: Sendable {
-    func registerSecurityKeyProvider() async throws -> [String]
+    func registerSecurityKeyProvider() async throws
     func listAgentIdentities() async throws -> [SSHAgentKey]
 }
 
@@ -38,6 +38,12 @@ public enum SSHAddError: Error, Equatable, Sendable {
 public actor SSHAddClient: SSHAddClientProtocol {
     public static let binaryPath = "/usr/bin/ssh-add"
     public static let providerPath = "/usr/lib/ssh-keychain.dylib"
+
+    /// `-K` may touch the SE provider; `-L` just queries the agent over
+    /// a unix socket. Both should fail fast if the agent is wedged — a
+    /// dead `SSH_AUTH_SOCK` must not hang the Settings tab.
+    static let registerTimeout: Duration = .seconds(30)
+    static let listTimeout: Duration = .seconds(15)
 
     private let binary: String
     private let provider: String
@@ -56,13 +62,14 @@ public actor SSHAddClient: SSHAddClientProtocol {
     // MARK: - registerSecurityKeyProvider
 
     /// `ssh-add -K -S <provider>` — register all SE-resident identities
-    /// with the running ssh-agent. Returns the SSH fingerprints
-    /// reported as added.
-    public func registerSecurityKeyProvider() async throws -> [String] {
+    /// with the running ssh-agent. Throws on non-zero exit; the caller
+    /// re-lists the agent to observe the resulting state.
+    public func registerSecurityKeyProvider() async throws {
         let result = try await runner.run(
             executable: binary,
             arguments: ["-K", "-S", provider],
-            stdin: nil
+            stdin: nil,
+            timeout: Self.registerTimeout
         )
         guard result.didSucceed else {
             log.error("ssh-add -K exit=\(result.exitCode, privacy: .public) stderr=\(result.stderr, privacy: .private)")
@@ -71,24 +78,25 @@ public actor SSHAddClient: SSHAddClientProtocol {
                 stderr: result.stderr
             )
         }
-        return parseSSHAddRegistration(result.stdout + "\n" + result.stderr)
     }
 
     // MARK: - listAgentIdentities
 
     /// `ssh-add -L` — list public keys in the running ssh-agent.
-    /// Exit 1 with "The agent has no identities." stdout is normal
-    /// for an empty agent; we treat it as an empty list, not an error.
+    /// An empty agent exits 1 and prints "The agent has no identities."
+    /// to stdout; we treat that as an empty list, not an error.
     public func listAgentIdentities() async throws -> [SSHAgentKey] {
         let result = try await runner.run(
             executable: binary,
             arguments: ["-L"],
-            stdin: nil
+            stdin: nil,
+            timeout: Self.listTimeout
         )
-        // ssh-add -L exits 1 when the agent is empty. Detect that
-        // common case and return empty rather than throwing.
-        let combined = result.stdout + "\n" + result.stderr
-        if combined.lowercased().contains("the agent has no identities") {
+        // Empty-agent detection. ssh-add(1) exits 1 here, so anchor on
+        // exit==1 AND the sentinel as a standalone stdout line — never a
+        // substring scan over stdout+stderr, which a public-key comment
+        // containing the phrase (or a non-English locale) could trip.
+        if result.exitCode == 1, isEmptyAgentMessage(result.stdout) {
             return []
         }
         guard result.didSucceed else {
@@ -100,4 +108,18 @@ public actor SSHAddClient: SSHAddClientProtocol {
         }
         return parseSSHAddList(result.stdout)
     }
+}
+
+/// True when `stdout` is the ssh-agent "no identities" sentinel: a
+/// single non-blank line equal to the documented message (case- and
+/// trailing-punctuation-tolerant). Anchored to a whole line so a key
+/// comment that merely contains the phrase cannot be mistaken for it.
+func isEmptyAgentMessage(_ stdout: String) -> Bool {
+    let lines = stdout
+        .split(separator: "\n", omittingEmptySubsequences: true)
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+    guard lines.count == 1, let line = lines.first else { return false }
+    let normalised = line.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+    return normalised == "the agent has no identities"
 }

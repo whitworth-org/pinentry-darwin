@@ -22,7 +22,7 @@ private let log = Logger(
 // MARK: - Protocol (for tests)
 
 public protocol SCAuthClientProtocol: Sendable {
-    func listIdentities() async throws -> [CTKIdentity]
+    func listIdentities() async throws -> CTKIdentityListing
     func createIdentity(label: String) async throws
     func deleteIdentity(publicKeyHash: String) async throws
 }
@@ -76,6 +76,13 @@ public func validatePublicKeyHash(_ hash: String) -> Bool {
 public actor SCAuthClient: SCAuthClientProtocol {
     public static let binaryPath = "/usr/sbin/sc_auth"
 
+    /// `create-ctk-identity -t bio` surfaces a Touch ID sheet and blocks
+    /// on the user's reaction; allow a generous ceiling. List/delete are
+    /// quick metadata operations.
+    static let createTimeout: Duration = .seconds(120)
+    static let listTimeout: Duration = .seconds(30)
+    static let deleteTimeout: Duration = .seconds(30)
+
     private let binary: String
     private let runner: any ProcessRunner
 
@@ -94,18 +101,20 @@ public actor SCAuthClient: SCAuthClientProtocol {
     /// the SSH fingerprint. We merge the two outputs by row order
     /// since `sc_auth` lists identities in a stable order within a
     /// single process invocation.
-    public func listIdentities() async throws -> [CTKIdentity] {
+    public func listIdentities() async throws -> CTKIdentityListing {
         let hexResult = try await runner.run(
             executable: binary,
             arguments: ["list-ctk-identities"],
-            stdin: nil
+            stdin: nil,
+            timeout: Self.listTimeout
         )
         try requireSuccess(hexResult)
 
         let sshResult = try await runner.run(
             executable: binary,
             arguments: ["list-ctk-identities", "-t", "ssh"],
-            stdin: nil
+            stdin: nil,
+            timeout: Self.listTimeout
         )
         try requireSuccess(sshResult)
 
@@ -126,12 +135,21 @@ public actor SCAuthClient: SCAuthClientProtocol {
 
         // Merge: zip by index when counts match, else fall back to
         // hex-only rows (the SSH variant is enrichment, not source of
-        // truth).
+        // truth). On mismatch we surface a non-fatal `partial` signal so
+        // the dropped SSH fingerprints are observable to the operator
+        // rather than silently truncated. Not fatal: a future sc_auth
+        // column change must still degrade to a usable hex-only list.
         guard hexRows.count == sshRows.count else {
             log.warning("sc_auth row count mismatch: hex=\(hexRows.count, privacy: .public) ssh=\(sshRows.count, privacy: .public)")
-            return hexRows
+            return CTKIdentityListing(
+                identities: hexRows,
+                partial: .fingerprintCountMismatch(
+                    hexRows: hexRows.count,
+                    sshRows: sshRows.count
+                )
+            )
         }
-        return zip(hexRows, sshRows).map { hex, ssh in
+        let merged = zip(hexRows, sshRows).map { hex, ssh in
             CTKIdentity(
                 keyType: hex.keyType,
                 publicKeyHash: hex.publicKeyHash,
@@ -144,6 +162,7 @@ public actor SCAuthClient: SCAuthClientProtocol {
                 isValid: hex.isValid
             )
         }
+        return CTKIdentityListing(identities: merged)
     }
 
     // MARK: - createIdentity
@@ -163,7 +182,8 @@ public actor SCAuthClient: SCAuthClientProtocol {
                 "-k", "p-256-ne",
                 "-t", "bio",
             ],
-            stdin: nil
+            stdin: nil,
+            timeout: Self.createTimeout
         )
         try requireSuccess(result)
     }
@@ -177,7 +197,8 @@ public actor SCAuthClient: SCAuthClientProtocol {
         let result = try await runner.run(
             executable: binary,
             arguments: ["delete-ctk-identity", "-h", publicKeyHash],
-            stdin: nil
+            stdin: nil,
+            timeout: Self.deleteTimeout
         )
         try requireSuccess(result)
     }

@@ -22,7 +22,8 @@ final class RealProcessRunnerTests: XCTestCase {
         let result = try await runner.run(
             executable: "/bin/dd",
             arguments: ["if=/dev/zero", "bs=4096", "count=64", "status=none"],
-            stdin: nil
+            stdin: nil,
+            timeout: .seconds(30)
         )
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertGreaterThanOrEqual(result.stdout.utf8.count, 4096 * 64)
@@ -36,7 +37,8 @@ final class RealProcessRunnerTests: XCTestCase {
         let result = try await runner.run(
             executable: "/bin/dd",
             arguments: ["if=/dev/zero", "bs=4096", "count=64"],
-            stdin: nil
+            stdin: nil,
+            timeout: .seconds(30)
         )
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertGreaterThanOrEqual(result.stdout.utf8.count, 4096 * 64)
@@ -50,10 +52,57 @@ final class RealProcessRunnerTests: XCTestCase {
         let result = try await runner.run(
             executable: "/bin/echo",
             arguments: ["hello", "world"],
-            stdin: nil
+            stdin: nil,
+            timeout: .seconds(30)
         )
         XCTAssertEqual(result.exitCode, 0)
         XCTAssertEqual(result.stdout, "hello world\n")
         XCTAssertTrue(result.stderr.isEmpty)
+    }
+
+    // L-6 / L-12: a hung child must time out (not block forever) and the
+    // continuation must be resumed exactly once. `/bin/sleep 30` with a
+    // sub-second timeout exercises the timeout path; the guard prevents a
+    // second resume when terminationHandler fires after SIGTERM.
+    func testHungChildTimesOut() async throws {
+        let runner = RealProcessRunner()
+        let start = ContinuousClock.now
+        do {
+            _ = try await runner.run(
+                executable: "/bin/sleep",
+                arguments: ["30"],
+                stdin: nil,
+                timeout: .milliseconds(300)
+            )
+            XCTFail("expected timedOut")
+        } catch let ProcessRunnerError.timedOut(executable, _) {
+            XCTAssertEqual(executable, "/bin/sleep")
+        } catch {
+            XCTFail("unexpected: \(error)")
+        }
+        // Returned well before the child's own 30s runtime.
+        let elapsed = ContinuousClock.now - start
+        XCTAssertLessThan(elapsed, .seconds(10))
+    }
+
+    // Resume-exactly-once on the success path: the child exits cleanly
+    // (terminationHandler resumes) well before a short-but-not-tiny
+    // timeout. The timeout task still fires afterwards and tries to
+    // resume again; without the single-shot guard that second resume
+    // would trap the whole test process. The deferred sleep gives the
+    // timeout task time to fire so a broken guard would crash here.
+    func testTimeoutAfterCleanExitIsNoOp() async throws {
+        let runner = RealProcessRunner()
+        let result = try await runner.run(
+            executable: "/bin/echo",
+            arguments: ["ok"],
+            stdin: nil,
+            timeout: .milliseconds(200)
+        )
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.stdout, "ok\n")
+        // Outlive the timeout window: the timeout task's late resume must
+        // be swallowed by the guard rather than crash the process.
+        try await Task.sleep(for: .milliseconds(400))
     }
 }

@@ -13,6 +13,7 @@ import Foundation
 struct RecordedInvocation: Sendable, Equatable {
     let executable: String
     let arguments: [String]
+    let timeout: Duration
 }
 
 /// Test runner that answers a sequence of canned responses keyed by
@@ -33,9 +34,14 @@ actor MockProcessRunner: ProcessRunner {
     func run(
         executable: String,
         arguments: [String],
-        stdin: Data?
+        stdin: Data?,
+        timeout: Duration
     ) async throws -> ProcessResult {
-        calls.append(RecordedInvocation(executable: executable, arguments: arguments))
+        calls.append(RecordedInvocation(
+            executable: executable,
+            arguments: arguments,
+            timeout: timeout
+        ))
         if let canned = byArgs[arguments] {
             return canned
         }

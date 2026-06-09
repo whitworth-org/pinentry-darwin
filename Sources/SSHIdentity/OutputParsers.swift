@@ -166,7 +166,12 @@ public func parseSSHAddList(_ output: String) -> [SSHAgentKey] {
         let line = String(raw)
         let trimmed = line.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { continue }
-        if trimmed.lowercased().contains("the agent has no identities") {
+        // Skip the empty-agent sentinel only when the WHOLE line is the
+        // message — not a substring, so a key whose comment contains the
+        // phrase is still parsed.
+        let sentinel = trimmed.lowercased()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        if sentinel == "the agent has no identities" {
             continue
         }
         let parts = trimmed.split(
@@ -182,24 +187,6 @@ public func parseSSHAddList(_ output: String) -> [SSHAgentKey] {
             comment: comment,
             rawLine: trimmed
         ))
-    }
-    return out
-}
-
-// MARK: - ssh-add -K
-
-/// Parse `ssh-add -K -S <provider>` output and return the SSH
-/// fingerprints reported as added. Lines look like:
-///   `Resident identity added: ECDSA-SK SHA256:vs4By...`
-/// We extract the `SHA256:...` portion.
-public func parseSSHAddRegistration(_ output: String) -> [String] {
-    var out: [String] = []
-    for raw in output.split(separator: "\n", omittingEmptySubsequences: true) {
-        let line = String(raw)
-        guard let range = line.range(of: "SHA256:") else { continue }
-        let suffix = line[range.lowerBound...]
-            .trimmingCharacters(in: .whitespaces)
-        out.append(suffix)
     }
     return out
 }

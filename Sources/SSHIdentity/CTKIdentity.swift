@@ -93,6 +93,29 @@ public struct CTKIdentity: Sendable, Hashable, Identifiable {
     }
 }
 
+// MARK: - Identity listing
+
+/// Result of `SCAuthClient.listIdentities`. Carries the merged rows plus
+/// a non-fatal `partial` signal: when the hex-hash and `-t ssh` passes
+/// disagree on row count, we still return the best-effort hex rows (SSH
+/// fingerprints are enrichment, not source of truth) but flag that some
+/// SSH fingerprints could not be paired, so the UI can say so rather
+/// than silently showing identities with missing fingerprints.
+public struct CTKIdentityListing: Sendable, Equatable {
+    public let identities: [CTKIdentity]
+    public let partial: PartialReason?
+
+    public enum PartialReason: Sendable, Equatable {
+        /// hex-pass and ssh-pass row counts disagreed.
+        case fingerprintCountMismatch(hexRows: Int, sshRows: Int)
+    }
+
+    public init(identities: [CTKIdentity], partial: PartialReason? = nil) {
+        self.identities = identities
+        self.partial = partial
+    }
+}
+
 // MARK: - Agent key
 
 /// One line from `ssh-add -L`. We split the OpenSSH wire format

@@ -41,7 +41,7 @@ final class SCAuthClientGatedTests: XCTestCase {
 
         try await client.createIdentity(label: label)
 
-        let identities = try await client.listIdentities()
+        let identities = try await client.listIdentities().identities
         guard let row = identities.first(where: { $0.label == label }) else {
             // Clean up any matching label before failing so a partial
             // run doesn't leave a dangling SE identity.
@@ -58,7 +58,7 @@ final class SCAuthClientGatedTests: XCTestCase {
 
         try await client.deleteIdentity(publicKeyHash: row.publicKeyHash)
 
-        let after = try await client.listIdentities()
+        let after = try await client.listIdentities().identities
         XCTAssertFalse(after.contains { $0.publicKeyHash == row.publicKeyHash })
     }
 }
