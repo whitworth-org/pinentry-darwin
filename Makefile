@@ -22,7 +22,14 @@
 TEAM_ID         := KHJA84J3YW
 BUNDLE_ID       := org.whitworth.pinentry-darwin
 APP_NAME        := pinentry-darwin
-VERSION         ?= 0.1.0
+
+# VERSION is the single source of truth: CFBundleShortVersionString in
+# App/Info.plist. Deriving it here keeps `make build`/`make audit`/`make
+# release` consistent with the bundle the auditor inspects, and prevents
+# the drift where this Makefile, Info.plist, and the Homebrew formula
+# carry three different numbers. Override on the command line (VERSION=x)
+# only for a dry run; the release process bumps Info.plist.
+VERSION         ?= $(shell /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' App/Info.plist)
 NOTARY_PROFILE  ?= pinentry-darwin-notary
 
 # SIGNER_NAME is the human-readable common-name from the Developer ID
@@ -43,6 +50,7 @@ ICON_DEST       := $(APP_RESOURCES)/Icon.icns
 
 ENTITLEMENTS    := App/$(APP_NAME).entitlements
 INFO_PLIST      := App/Info.plist
+FORMULA         := dist/homebrew/$(APP_NAME).rb
 
 ZIP_PATH        := $(BUILD_DIR)/$(APP_NAME).zip
 TARBALL_PATH    := $(BUILD_DIR)/$(APP_NAME)-$(VERSION)-arm64.tar.gz
@@ -51,7 +59,7 @@ PKG_SIGNED      := $(BUILD_DIR)/$(APP_NAME)-$(VERSION).pkg
 
 .DEFAULT_GOAL := help
 
-.PHONY: help build debug test integration-check audit audit-release check-signing sign notarize pkg tarball release clean icon
+.PHONY: help build debug test integration-check audit audit-release check-signing check-formula sign notarize pkg tarball release clean icon
 
 # --- Targets -----------------------------------------------------------------
 
@@ -65,6 +73,7 @@ help:
 	@echo "  audit           static-audit the built .app bundle (Mach-O, plist, entitlements)"
 	@echo "  audit-release   like audit, plus require Developer ID + stapled notarization"
 	@echo "  check-signing   verify Developer ID identity for Team $(TEAM_ID)"
+	@echo "  check-formula   verify the Homebrew formula has no placeholder / version drift"
 	@echo "  sign            codesign the .app bundle (depends: build, check-signing)"
 	@echo "  notarize        submit to notarytool and staple (depends: sign)"
 	@echo "  pkg             build a signed .pkg installer (depends: notarize)"
@@ -135,6 +144,24 @@ check-signing:
 	fi
 	@echo "Found codesigning identity for Team $(TEAM_ID)."
 
+# A release must not publish a stale or placeholder Homebrew formula:
+# fail if the sha256 still carries the REPLACE_WITH_ placeholder, or if
+# the formula's pinned `version` has drifted from VERSION (the Info.plist
+# source of truth). Pure text checks — no brew toolchain required.
+check-formula:
+	@if grep -q 'REPLACE_WITH_' $(FORMULA); then \
+		echo "ERROR: $(FORMULA) still contains a REPLACE_WITH_ placeholder."; \
+		echo "       Fill in the notarized tarball sha256 before releasing."; \
+		exit 1; \
+	fi
+	@formula_version=$$(sed -n 's/^[[:space:]]*version "\(.*\)"$$/\1/p' $(FORMULA)); \
+	if [ "$$formula_version" != "$(VERSION)" ]; then \
+		echo "ERROR: $(FORMULA) version '$$formula_version' != VERSION '$(VERSION)'."; \
+		echo "       Bump the formula to match App/Info.plist before releasing."; \
+		exit 1; \
+	fi
+	@echo "Formula $(FORMULA) is release-ready (version $(VERSION), no placeholders)."
+
 sign: build check-signing
 	@# AMFI's XML parser rejects long XML comments in entitlements files
 	@# ("AMFIUnserializeXML: syntax error"). plutil -convert xml1 emits a
@@ -190,7 +217,7 @@ tarball: notarize
 # would still accept. `audit-release` runs after the bundle is fully
 # notarised and stapled (via pkg → notarize → sign chain), so it sees
 # the final artefact rather than an in-progress build.
-release: pkg tarball audit-release
+release: pkg tarball audit-release check-formula
 	@echo "Release artifacts:"
 	@echo "  $(PKG_SIGNED)"
 	@echo "  $(TARBALL_PATH)"

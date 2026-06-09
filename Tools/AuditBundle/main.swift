@@ -2,9 +2,11 @@
 // Copyright 2026 Ryan Whitworth.
 //
 // main.swift — entry point for the `audit-bundle` SwiftPM executable
-// target. Drop-in replacement for `scripts/audit-bundle.sh`.
+// target. The bundle-audit enforcement lives in the check predicates in
+// Tools/AuditBundle/Checks.swift (the former scripts/audit-bundle.sh was
+// retired in favour of this tool).
 //
-// Usage (mirrors the legacy script):
+// Usage:
 //   swift run audit-bundle                        # default bundle path
 //   swift run audit-bundle path/to/app            # explicit path
 //   swift run audit-bundle --release              # require Developer ID
@@ -55,11 +57,10 @@ if !FileManager.default.fileExists(atPath: bundlePath, isDirectory: &isDirectory
 }
 
 // Repo root is the current working directory by convention. `make`
-// and CI invoke the audit from the repo root; for `swift run` from a
-// non-root directory, set `--repo-root <path>` explicitly. This
-// matches the legacy `scripts/audit-bundle.sh` which computed its
-// REPO_ROOT relative to `$0` and then used it only to find the
-// fallback entitlements file at `<root>/App/pinentry-darwin.entitlements`.
+// and CI invoke the audit from the repo root. It is used only by
+// loadEntitlements() in Tools/AuditBundle/Checks.swift to find the
+// fallback entitlements source at
+// `<root>/App/pinentry-darwin.entitlements` when the bundle is unsigned.
 let repoRoot = FileManager.default.currentDirectoryPath
 
 let paths = BundlePaths(bundle: bundlePath, repoRoot: repoRoot)

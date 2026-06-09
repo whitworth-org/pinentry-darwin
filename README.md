@@ -8,8 +8,10 @@ Download `pinentry-darwin-<version>.pkg` from the [latest release](../../release
 
 ```sh
 sudo installer -pkg pinentry-darwin-*.pkg -target /
-echo 'pinentry-program /Applications/pinentry-darwin.app/Contents/MacOS/pinentry-darwin' \
-  >> ~/.gnupg/gpg-agent.conf
+mkdir -p ~/.gnupg
+grep -q 'pinentry-darwin' ~/.gnupg/gpg-agent.conf 2>/dev/null \
+  || echo 'pinentry-program /Applications/pinentry-darwin.app/Contents/MacOS/pinentry-darwin' \
+       >> ~/.gnupg/gpg-agent.conf
 gpgconf --kill gpg-agent
 ```
 

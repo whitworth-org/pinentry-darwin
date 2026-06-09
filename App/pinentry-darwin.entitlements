@@ -31,8 +31,8 @@
     intentionally absent. Setting any of them to <false/> is a
     no-op (those keys only weaken when set to <true/>); setting
     any to <true/> is a hardening regression. The CI assertion
-    that nobody re-introduces them lives in
-    scripts/audit-bundle.sh.
+    that nobody re-introduces them lives in the forbidden-entitlement
+    allowlist in Tools/AuditBundle/Checks.swift (checkEntitlements).
 
     App Sandbox (com.apple.security.app-sandbox) is intentionally
     absent: pinentry-darwin is fork-exec'd by gpg-agent and
@@ -42,8 +42,9 @@
 
     No resource-access entitlement (network.*, device.*,
     personal-information.*, automation.apple-events) belongs in
-    this file either; pinentry needs none of them. The audit
-    script enforces that as well.
+    this file either; pinentry needs none of them.
+    Tools/AuditBundle/Checks.swift (checkEntitlements) enforces that
+    as well.
 -->
 <plist version="1.0">
 <dict>
