@@ -217,7 +217,13 @@ tarball: notarize
 # would still accept. `audit-release` runs after the bundle is fully
 # notarised and stapled (via pkg → notarize → sign chain), so it sees
 # the final artefact rather than an in-progress build.
-release: pkg tarball audit-release check-formula
+#
+# `check-formula` is intentionally NOT a prerequisite here: the formula's
+# pinned sha256 is the hash of the *notarised* tarball, which only exists
+# after this target runs, and the formula itself ships from a separate tap
+# repo. Run `make check-formula` as a pre-flight once the tarball hash is
+# known (the release workflow publishes sha256sums.txt for that purpose).
+release: pkg tarball audit-release
 	@echo "Release artifacts:"
 	@echo "  $(PKG_SIGNED)"
 	@echo "  $(TARBALL_PATH)"
