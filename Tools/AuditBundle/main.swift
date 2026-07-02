@@ -18,11 +18,13 @@
 //   1 — at least one check failed
 //   2 — bundle path missing
 //
-// Override the expected team identifier with PINENTRY_DARWIN_TEAM_ID
-// (default KHJA84J3YW). Useful for CI building under a different
-// developer identity.
+// Override the expected team identifier with PINENTRY_DARWIN_TEAM_ID.
+// If unset, audit-bundle falls back to `defaultTeamIdentifier` below.
+// Useful for CI building under a different developer identity.
 
 import Foundation
+
+let defaultTeamIdentifier = "KHJA84J3YW"
 
 let argv = CommandLine.arguments
 var releaseMode = false
@@ -70,7 +72,8 @@ checkBundleStructure(paths, &findings)
 checkMachOShape(paths, &findings)
 checkInfoPlist(paths, &findings)
 checkEntitlements(paths, releaseMode: releaseMode, &findings)
-let expectedTeam = ProcessInfo.processInfo.environment["PINENTRY_DARWIN_TEAM_ID"] ?? "KHJA84J3YW"
+let expectedTeam =
+    ProcessInfo.processInfo.environment["PINENTRY_DARWIN_TEAM_ID"] ?? defaultTeamIdentifier
 checkCodesign(paths, releaseMode: releaseMode, expectedTeamId: expectedTeam, &findings)
 
 if findings.count == 0 {

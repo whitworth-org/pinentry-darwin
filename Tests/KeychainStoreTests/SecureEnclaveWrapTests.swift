@@ -136,7 +136,13 @@ final class SecureEnclaveWrapTests: XCTestCase {
         XCTAssertEqual(store.loadDataRepresentation(fingerprint: upper), Data([0xAA]))
     }
 
-    // MARK: - unwrap error paths (no SE required)
+    // MARK: - unwrap error paths (no SE key material used)
+    //
+    // These tests exercise blob validation only and never touch SE key
+    // material, but they still require SE availability: `unwrap` fail-closes
+    // with `enclaveUnavailable` before any parsing when `isAvailable` is
+    // false, so on a non-SE host they would see the wrong error. Hence
+    // `skipIfNoSE()` — do not remove it.
 
     @MainActor
     func testUnwrapRejectsShortBlob() throws {
@@ -203,10 +209,11 @@ final class SecureEnclaveWrapTests: XCTestCase {
 
     @MainActor
     func testUnwrapWithMissingSEKeyThrows() throws {
-        // Calls SecureEnclaveWrap.wrap which generates a real SE key;
-        // gate on the SE-run env var, not just SE availability, so
-        // developer machines do not silently consume SE key slots when
-        // running the suite without intent.
+        // Calls SecureEnclaveWrap.wrap, which generates a real SE key.
+        // Requires both SE availability AND the PINENTRY_DARWIN_RUN_SE_TESTS
+        // env-var opt-in (via skipUnlessSERunEnabled), so developer machines
+        // do not silently consume SE key slots when running the suite
+        // without intent.
         try skipUnlessSERunEnabled()
         let store = keychainHandleStore()
         // Wrap a payload so we have a valid blob, but then forget the

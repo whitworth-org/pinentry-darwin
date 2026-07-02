@@ -113,9 +113,16 @@ final class AuthenticatorTests: XCTestCase {
         XCTAssertLessThanOrEqual(sanitized!.utf8.count, Authenticator.maxReasonBytes)
         // Must still be valid UTF-8 (Swift String guarantees this; reading
         // .utf8 implicitly validates).
+        // UTF-8 length of one full shield grapheme "🛡️" (U+1F6E1 + U+FE0F).
+        let shieldWithVS16ByteLength = 7
+        // UTF-8 length of the bare shield "🛡" (U+1F6E1) — what remains if
+        // the byte cap lands between the base scalar and its variation
+        // selector, dropping only the VS16.
+        let shieldOnlyByteLength = 4
+        let remainder = sanitized!.utf8.count % shieldWithVS16ByteLength
         XCTAssertTrue(
-            sanitized!.utf8.count % 7 == 0 || sanitized!.utf8.count % 7 == 4,
-            "shield+VS16 = 7 bytes; check the cap doesn't slice mid-scalar"
+            remainder == 0 || remainder == shieldOnlyByteLength,
+            "cap must cut on a scalar boundary, never mid-scalar; remainder: \(remainder)"
         )
     }
 
