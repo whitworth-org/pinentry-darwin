@@ -123,7 +123,7 @@ final class SessionTests: XCTestCase {
         let value = try await session.inquireQuality(candidate)
         XCTAssertEqual(value, 42)
 
-        let line = try Self.readOneLine(agentRead)
+        let line = try readLine(agentRead)
         XCTAssertTrue(line.hasPrefix("INQUIRE QUALITY "), "got: \(line)")
 
         await session.close()
@@ -151,7 +151,10 @@ final class SessionTests: XCTestCase {
         let input = try FileHandle(forReadingFrom: tmp)
         let output = FileHandle.nullDevice
         let session = Session(input: input, output: output)
-        defer { Task { await session.close() } }
+        // XCTest awaits async teardown blocks, so close is guaranteed to
+        // complete before the test case finishes (a `defer`red Task would
+        // be fire-and-forget).
+        addTeardownBlock { await session.close() }
 
         // The first `cap` calls succeed.
         for _ in 0..<cap {
@@ -193,10 +196,6 @@ final class SessionTests: XCTestCase {
     /// without the trailing LF. Synchronous; used after we know the writer
     /// has already produced output.
     private func readLine(_ fh: FileHandle) throws -> String {
-        return try Self.readOneLine(fh)
-    }
-
-    fileprivate static func readOneLine(_ fh: FileHandle) throws -> String {
         var buffer = Data()
         while true {
             let chunk = try fh.read(upToCount: 1) ?? Data()

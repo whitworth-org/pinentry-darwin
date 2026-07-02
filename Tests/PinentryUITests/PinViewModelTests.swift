@@ -35,7 +35,7 @@ final class PinViewModelTests: XCTestCase {
     // character" affordance is wired off `model.canSubmit`. If this
     // invariant breaks, the visual transition stops firing.
     @MainActor
-    func testCanSubmitFlipsOnFirstCharacterSyncrhonously() {
+    func testCanSubmitFlipsOnFirstCharacterSynchronously() {
         let spec = DialogSpec(kind: .pin)
         let model = PinViewModel(
             spec: spec,
