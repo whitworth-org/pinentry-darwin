@@ -3,10 +3,10 @@
 #
 # Homebrew formula for pinentry-darwin.
 #
-# Place this file in a tap repository (e.g. github.com/whitworth/homebrew-tap)
+# Place this file in a tap repository (e.g. github.com/whitworth-org/homebrew-tap)
 # at Formula/pinentry-darwin.rb, then:
 #
-#   brew tap whitworth/tap
+#   brew tap whitworth-org/tap
 #   brew install pinentry-darwin
 #
 # Two install modes:
@@ -18,15 +18,16 @@
 
 class PinentryDarwin < Formula
   desc "Modern Swift 6 / SwiftUI replacement for pinentry-mac"
-  homepage "https://github.com/whitworth/pinentry-darwin"
+  homepage "https://github.com/whitworth-org/pinentry-darwin"
   license "MIT"
-  version "0.1.0"
+  version "1.2.2"
 
-  # These URL/sha256 placeholders are filled in per release.
+  # The URL/sha256 pair is updated per release; the sha256 is the hash of
+  # the notarized tarball published in the release's sha256sums.txt.
   on_macos do
     on_arm do
-      url "https://github.com/whitworth/pinentry-darwin/releases/download/v#{version}/pinentry-darwin-#{version}-arm64.tar.gz"
-      sha256 "REPLACE_WITH_NOTARIZED_TARBALL_SHA256"
+      url "https://github.com/whitworth-org/pinentry-darwin/releases/download/v#{version}/pinentry-darwin-#{version}-arm64.tar.gz"
+      sha256 "2bb23b5d00721de99cbf94e704ad2506ce8f0ff91a0a89ab37cbb288c277022a"
     end
     on_intel do
       odie "pinentry-darwin currently ships arm64-only. Build from source on Intel: brew install --build-from-source pinentry-darwin"
@@ -34,7 +35,7 @@ class PinentryDarwin < Formula
   end
 
   head do
-    url "https://github.com/whitworth/pinentry-darwin.git", branch: "main"
+    url "https://github.com/whitworth-org/pinentry-darwin.git", branch: "main"
   end
 
   depends_on macos: :sequoia
