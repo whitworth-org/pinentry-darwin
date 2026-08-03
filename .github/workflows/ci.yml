@@ -139,7 +139,7 @@ jobs:
         # where code-scanning SARIF upload requires GHAS. Findings surface
         # as PR annotations instead. (Re-enable if the repo goes public or
         # buys GHAS.) zizmor is a hard gate: non-zero exit fails the job.
-        uses: zizmorcore/zizmor-action@192e21d79ab29983730a13d1382995c2307fbcaa # v0.5.7
+        uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
         with:
           advanced-security: false
           annotations: true
