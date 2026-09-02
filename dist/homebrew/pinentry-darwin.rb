@@ -20,14 +20,14 @@ class PinentryDarwin < Formula
   desc "Modern Swift 6 / SwiftUI replacement for pinentry-mac"
   homepage "https://github.com/whitworth-org/pinentry-darwin"
   license "MIT"
-  version "1.2.2"
+  version "1.2.3"
 
   # The URL/sha256 pair is updated per release; the sha256 is the hash of
   # the notarized tarball published in the release's sha256sums.txt.
   on_macos do
     on_arm do
       url "https://github.com/whitworth-org/pinentry-darwin/releases/download/v#{version}/pinentry-darwin-#{version}-arm64.tar.gz"
-      sha256 "2bb23b5d00721de99cbf94e704ad2506ce8f0ff91a0a89ab37cbb288c277022a"
+      sha256 "23185f1ed359bec41bcfed1bcb8b068263e718946f3e0e5318f679962a8575ce"
     end
     on_intel do
       odie "pinentry-darwin currently ships arm64-only. Build from source on Intel: brew install --build-from-source pinentry-darwin"
