@@ -45,7 +45,13 @@ jobs:
       - name: Harden runner
         # Allowlist scope: GitHub (checkout, action downloads, asset uploads,
         # actions runtime), Apple (notarytool submission, codesign timestamp
-        # + OCSP/CRL during sign), StepSecurity telemetry. Wildcards:
+        # + OCSP/CRL during sign), StepSecurity telemetry. Two Apple services
+        # are plain HTTP and must be listed on :80 explicitly: codesign's
+        # RFC 3161 timestamp request (timestamp.apple.com) and trustd's
+        # issuer-certificate fetch (certs.apple.com). harden-runner >= 2.20
+        # enforces block mode on macOS runners (earlier versions were
+        # audit-only there), so a missing :80 entry fails the sign step
+        # with "The timestamp service is not available". Wildcards:
         # *.apple.com covers notarize/notary-submissions/appstoreconnect/
         # developer/timestamp/ocsp/crl; *.blob.core.windows.net covers
         # GitHub's randomly-assigned action result storage; *.actions
@@ -60,11 +66,13 @@ jobs:
             *.blob.core.windows.net:443
             agent.api.stepsecurity.io:443
             api.github.com:443
+            certs.apple.com:80
             codeload.github.com:443
             github.com:443
             objects.githubusercontent.com:443
             prod.app-api.stepsecurity.io:443
             raw.githubusercontent.com:443
+            timestamp.apple.com:80
             uploads.github.com:443
 
       - name: Checkout
