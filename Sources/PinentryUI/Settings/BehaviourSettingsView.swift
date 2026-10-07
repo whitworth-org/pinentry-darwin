@@ -39,9 +39,11 @@ public struct BehaviourSettingsView: View {
             }
 
             Section("Security") {
-                Toggle("Secure keyboard entry", isOn: $settings.secureKeyboardEntry)
-                    .onChange(of: settings.secureKeyboardEntry) { _, _ in onChange(settings) }
-                Text("Routes keystrokes through a privileged path other apps cannot observe. macOS shows a lock badge in the menu bar while active. Disable only if it conflicts with assistive tools.")
+                Text(
+                    "Secure keyboard entry is always on while a passphrase dialog is open. "
+                        + "Keystrokes take a path other apps cannot observe, and macOS shows "
+                        + "a lock badge in the menu bar."
+                )
                     .font(Theme.captionFont)
                     .foregroundStyle(Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)

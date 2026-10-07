@@ -65,6 +65,7 @@ Requires Swift 6.2+ and the macOS 26 SDK. `make release` also needs a Developer 
 ## Security
 
 - Passphrases never touch `Swift.String`. They live in `mlock`'d, zero-on-`deinit` buffers and stream straight to the Assuan `D` line; no log line reaches them.
+- Secure Keyboard Entry is always on while the passphrase dialog is open; it cannot be disabled.
 - Hardened Runtime on; `get-task-allow=false` blocks `task_for_pid` debugger attach.
 - App Sandbox off by design: it breaks the stdio pipes `gpg-agent` passes to its child.
 - No third-party dependencies.

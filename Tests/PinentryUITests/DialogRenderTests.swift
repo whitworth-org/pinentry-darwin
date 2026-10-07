@@ -37,7 +37,7 @@ final class DialogRenderTests: XCTestCase {
             spec: spec, showTypingByDefault: false, saveByDefault: false, onResult: { _ in })
         model.setPin(from: pin)
         model.setRepeat(from: repeatPin)
-        return PinView(spec: spec, model: model, secureKeyboardEntry: false)
+        return PinView(spec: spec, model: model)
     }
 
     /// Mounts in Light and Dark, saves PNGs, and returns the Light mount.
@@ -50,6 +50,17 @@ final class DialogRenderTests: XCTestCase {
         light.save(named: "\(name)-light")
         XCTAssertFalse(light.pngData().isEmpty, "\(name) light rendered nothing")
         return light
+    }
+
+    // MARK: - Secure keyboard entry
+
+    func testPassphraseDialogEngagesSecureKeyboardEntry() {
+        _ = SecureInput.reset()
+        defer { _ = SecureInput.reset() }
+
+        _ = MountedDialog(pinView(spec(.pin)))
+
+        XCTAssertTrue(SecureInput.isActive, "GETPIN must enable secure keyboard entry on appear")
     }
 
     // MARK: - Visual states
