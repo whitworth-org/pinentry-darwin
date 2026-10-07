@@ -93,36 +93,47 @@ private final class PreferencesAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func openSettingsWindow(initial: UISettings) {
         let store = uiStore
+        // NSApp.appearance reaches this window, its sheets, alerts and the
+        // menu bar. Applying it on every change makes a theme pick take
+        // effect in the open Settings window immediately.
+        NSApp.appearance = initial.theme.appearance
         let saveUI: @Sendable (UISettings) -> Void = { newValue in
+            Task { @MainActor in
+                NSApp.appearance = newValue.theme.appearance
+            }
             Task {
                 await store.save(newValue)
             }
         }
 
-        // Per-key Forget action — deletes the keychain entry for one
-        // fingerprint. Runs off the main actor so SecItemDelete (which
-        // can prompt for biometric unlock) does not block the UI run loop.
-        let forget: @Sendable (String) async -> Void = { fpr in
+        // Forget actions delete Keychain entries. They run off the main
+        // actor so SecItemDelete does not block the UI run loop, and they
+        // throw so the Settings views keep a key's policy when a delete fails.
+        let forget: PerKeyPolicyView.ForgetCallback = { fpr in
+            try KeychainStore().clear(fingerprint: fpr)
+        }
+        let forgetAll: @concurrent @Sendable () async throws -> Void = {
             let keychain = KeychainStore()
-            try? keychain.clear(fingerprint: fpr)
+            let policies = KeyPolicyStore()
+            try SavedPassphrases.forgetAll(
+                fingerprints: KeychainEnumerator.fingerprints(),
+                clear: { try keychain.clear(fingerprint: $0) },
+                removeOverride: { policies.removeOverride(for: $0) }
+            )
         }
 
-        // KeychainStore does not currently expose a clearAll method; for
-        // v1.0.0 we leave this nil and the SettingsRootView shows
-        // "Coming soon" UI.
         let root = SettingsRootView(
             uiSettings: initial,
             keychainPrefs: UserPrefs(),
-            clearAllPassphrases: nil,
+            clearAllPassphrases: forgetAll,
             forgetPassphrase: forget,
             saveUI: saveUI
         )
 
         let hosting = NSHostingController(rootView: root)
         let win = NSWindow(contentViewController: hosting)
-        win.title = "Pinentry Darwin Settings"
         win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        win.setContentSize(NSSize(width: 560, height: 400))
+        win.setContentSize(NSSize(width: 600, height: 520))
         win.center()
         win.makeKeyAndOrderFront(nil)
 

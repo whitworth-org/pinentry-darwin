@@ -4,9 +4,10 @@
 // SessionTests — exercise the Session actor against a pair of `Pipe`
 // instances so the test process plays the role of gpg-agent.
 
+import Foundation
+import SecureMemory
 import XCTest
 @testable import AssuanProtocol
-import SecureMemory
 
 // MARK: - SessionTests
 
@@ -170,6 +171,205 @@ final class SessionTests: XCTestCase {
         } catch SessionError.commandLimitExceeded {
             // expected
         }
+    }
+
+    // MARK: Line framing
+
+    /// Stage `bytes` as the agent's whole output, then close the writer so the
+    /// session sees EOF after consuming them.
+    private func makeSession(agentSends bytes: [UInt8]) throws -> Session {
+        let (session, agentWrite, _) = makeSession()
+        try agentWrite.write(contentsOf: Data(bytes))
+        try agentWrite.close()
+        addTeardownBlock { await session.close() }
+        return session
+    }
+
+    func testCRLFTerminatorsAreStripped() async throws {
+        let session = try makeSession(agentSends: Array("SETDESC hi\r\nGETPIN\r\n".utf8))
+        let first = try await session.nextCommand()
+        XCTAssertEqual(first, .setDesc("hi"))
+        let second = try await session.nextCommand()
+        XCTAssertEqual(second, .getPin)
+    }
+
+    func testBlankAndCommentLinesAreSkipped() async throws {
+        let session = try makeSession(agentSends: Array("\n# a comment\n\nRESET\n".utf8))
+        let command = try await session.nextCommand()
+        XCTAssertEqual(command, .reset)
+    }
+
+    func testFinalLineWithoutLFIsDeliveredAtEOF() async throws {
+        let session = try makeSession(agentSends: Array("RESET\nGETPIN".utf8))
+        let first = try await session.nextCommand()
+        XCTAssertEqual(first, .reset)
+        let second = try await session.nextCommand()
+        XCTAssertEqual(second, .getPin)
+        let third = try await session.nextCommand()
+        XCTAssertEqual(third, .bye)
+    }
+
+    func testLineSplitAcrossReadsIsReassembled() async throws {
+        let (session, agentWrite, _) = makeSession()
+        addTeardownBlock { await session.close() }
+        try agentWrite.write(contentsOf: Data("SETDESC Hel".utf8))
+        let writer = Task.detached {
+            try await Task.sleep(for: .milliseconds(100))
+            try agentWrite.write(contentsOf: Data("lo\n".utf8))
+        }
+        let command = try await session.nextCommand()
+        XCTAssertEqual(command, .setDesc("Hello"))
+        try await writer.value
+    }
+
+    func testOverlongLineWithoutLFIsRejected() async throws {
+        let session = try makeSession(agentSends: Array(repeating: 0x41, count: 5000))
+        do {
+            _ = try await session.nextCommand()
+            XCTFail("expected malformedLine for an unterminated overlong line")
+        } catch SessionError.malformedLine {
+            // expected
+        }
+    }
+
+    func testOverlongTerminatedLineIsRejected() async throws {
+        let line = Array(repeating: UInt8(0x41), count: LineCodec.maxLineLength + 1) + [0x0A]
+        let session = try makeSession(agentSends: line)
+        do {
+            _ = try await session.nextCommand()
+            XCTFail("expected malformedLine for a 1001-byte line")
+        } catch SessionError.malformedLine {
+            // expected
+        }
+    }
+
+    func testMaxLengthLineIsAccepted() async throws {
+        let argument = String(repeating: "a", count: LineCodec.maxLineLength - 8)
+        let session = try makeSession(agentSends: Array("SETDESC \(argument)\n".utf8))
+        let command = try await session.nextCommand()
+        XCTAssertEqual(command, .setDesc(argument))
+    }
+
+    func testInvalidUTF8LineIsRejected() async throws {
+        let session = try makeSession(agentSends: [0x52, 0xFF, 0xFE, 0x0A])
+        do {
+            _ = try await session.nextCommand()
+            XCTFail("expected malformedLine for invalid UTF-8")
+        } catch SessionError.malformedLine {
+            // expected
+        }
+    }
+
+    func testSessionRecoversAfterInvalidUTF8Line() async throws {
+        let session = try makeSession(agentSends: [0x52, 0xFF, 0x0A] + Array("RESET\n".utf8))
+        await assertMalformed(session)
+        let next = try await session.nextCommand()
+        XCTAssertEqual(next, .reset)
+    }
+
+    func testSessionRecoversAfterOverlongLine() async throws {
+        let overlong = String(repeating: "A", count: LineCodec.maxLineLength + 500)
+        let session = try makeSession(agentSends: Array("\(overlong)\nRESET\n".utf8))
+        await assertMalformed(session)
+        let next = try await session.nextCommand()
+        XCTAssertEqual(next, .reset)
+    }
+
+    func testSessionSkipsRestOfOverlongLineWhoseTerminatorArrivesLater() async throws {
+        let (session, agentWrite, _) = makeSession()
+        addTeardownBlock { await session.close() }
+        try agentWrite.write(contentsOf: Data(repeating: 0x41, count: 3000))
+        await assertMalformed(session)
+
+        try agentWrite.write(contentsOf: Data("AAAA\nRESET\n".utf8))
+        try agentWrite.close()
+        let next = try await session.nextCommand()
+        XCTAssertEqual(next, .reset, "the tail of the overlong line must not parse as a command")
+    }
+
+    func testSessionRecoversAfterInvalidTrailingLineAtEOF() async throws {
+        let session = try makeSession(agentSends: [0xFF])
+        await assertMalformed(session)
+        let next = try await session.nextCommand()
+        XCTAssertEqual(next, .bye)
+    }
+
+    private func assertMalformed(
+        _ session: Session, file: StaticString = #filePath, line: UInt = #line
+    ) async {
+        do {
+            _ = try await session.nextCommand()
+            XCTFail("expected malformedLine", file: file, line: line)
+        } catch SessionError.malformedLine {
+            // expected
+        } catch {
+            XCTFail("unexpected error \(error)", file: file, line: line)
+        }
+    }
+
+    // MARK: Secret D-line chunking
+
+    func testLongSecretIsSplitIntoBoundedDataLines() async throws {
+        let (session, _, agentRead) = makeSession()
+        // Every byte escapes to %HH, the worst case for line length.
+        let secret = SecureBytes(Array(repeating: UInt8(0x2B), count: 700))
+        try await session.send(.data(secret))
+        try await session.send(.ok)
+
+        var recovered: [UInt8] = []
+        var lines = 0
+        while true {
+            let line = try readLine(agentRead)
+            if line == "OK" { break }
+            XCTAssertTrue(line.hasPrefix("D "), "got: \(line)")
+            XCTAssertLessThanOrEqual(line.utf8.count, LineCodec.maxLineLength)
+            recovered += try LineCodec.unescapeFromDataLine(String(line.dropFirst(2)))
+            lines += 1
+        }
+        XCTAssertEqual(lines, 3, "700 source bytes at 332 per line is three lines")
+        XCTAssertEqual(recovered, Array(repeating: 0x2B, count: 700))
+    }
+
+    func testEmptySecretSendsEmptyDataLine() async throws {
+        let (session, _, agentRead) = makeSession()
+        try await session.send(.data(SecureBytes(capacity: 8)))
+        let line = try readLine(agentRead)
+        XCTAssertEqual(line, "D ")
+    }
+
+    // MARK: inquireQuality wire format
+
+    func testInquireQualityEscapesCandidate() async throws {
+        let (session, agentWrite, agentRead) = makeSession()
+        defer { try? agentRead.close() }
+        try agentWrite.write(contentsOf: Data("D -7\nOK\n".utf8))
+        try agentWrite.close()
+
+        let value = try await session.inquireQuality(SecureBytes(Array("a b+%\u{7F}".utf8)))
+        XCTAssertEqual(value, -7)
+        let line = try readLine(agentRead)
+        XCTAssertEqual(line, "INQUIRE QUALITY a b%2B%25%7F")
+        await session.close()
+    }
+
+    func testInquireQualityClampsToRange() async throws {
+        let (session, agentWrite, agentRead) = makeSession()
+        defer { try? agentRead.close() }
+        try agentWrite.write(contentsOf: Data("D 9999\nOK\n".utf8))
+        try agentWrite.close()
+        let value = try await session.inquireQuality(SecureBytes(Array("x".utf8)))
+        XCTAssertEqual(value, 100)
+    }
+
+    func testInquireQualityOverlongCandidateReturnsZeroWithoutWriting() async throws {
+        let (session, agentWrite, agentRead) = makeSession()
+        try agentWrite.close()
+        let candidate = SecureBytes(Array(repeating: UInt8(0x61), count: 329))
+        let value = try await session.inquireQuality(candidate)
+        XCTAssertEqual(value, 0)
+        await session.close()
+        // Session closed its output end, so a read sees EOF with nothing sent.
+        XCTAssertEqual(try agentRead.readToEnd() ?? Data(), Data())
     }
 
     // MARK: ERR encoding

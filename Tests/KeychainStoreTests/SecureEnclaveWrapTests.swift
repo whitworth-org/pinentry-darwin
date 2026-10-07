@@ -44,6 +44,27 @@ final class SecureEnclaveWrapTests: XCTestCase {
         XCTAssertTrue(SecureEnclaveWrap.isWrapped(Data([0x01, 0x04, 0xAA, 0xBB])))
     }
 
+    /// The `SecureBytes` overload (used on keychain read-back, where the payload may be a
+    /// plaintext passphrase) must classify every input exactly like the `Data` one.
+    func testIsWrappedOnSecureBytesAgreesWithDataOverload() {
+        let samples: [[UInt8]] = [
+            [0x01],
+            Array("hunter2".utf8),
+            [0x01, 0x01, 0x02, 0x03],
+            [0x01, 0x04, 0xAA, 0xBB],
+            [0x04, 0x01],
+        ]
+        for sample in samples {
+            XCTAssertEqual(
+                SecureEnclaveWrap.isWrapped(SecureBytes(sample)),
+                SecureEnclaveWrap.isWrapped(Data(sample)),
+                "disagreement for \(sample)"
+            )
+        }
+        XCTAssertTrue(SecureEnclaveWrap.isWrapped(SecureBytes([0x01, 0x04, 0xAA, 0xBB])))
+        XCTAssertFalse(SecureEnclaveWrap.isWrapped(SecureBytes(Array("hunter2".utf8))))
+    }
+
     // MARK: - SL-5: handle-decode failure is a distinct error case
 
     /// `keyHandleDecodeFailed` must be a value distinct from
@@ -393,11 +414,11 @@ final class SecureEnclaveWrapTests: XCTestCase {
     // MARK: - Helpers
 
     private func bytesOf(_ s: String) -> SecureBytes {
-        Array(s.utf8).withUnsafeBufferPointer { SecureBytes(copying: $0) }
+        SecureBytes(Array(s.utf8))
     }
 
     private func byteArray(of secure: SecureBytes) -> [UInt8] {
-        secure.withUnsafeBytes { Array($0) }
+        secure.withSpan { span in (0..<span.count).map { span[$0] } }
     }
 
     private func skipIfNoSE() throws {

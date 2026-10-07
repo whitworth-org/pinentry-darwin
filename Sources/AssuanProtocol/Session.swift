@@ -10,9 +10,9 @@
 // `SecureBytes` and the escaped wire form is the only thing that leaves
 // the actor.
 
-import Foundation
 import Darwin
-import SecureMemory
+public import Foundation
+public import SecureMemory
 
 // MARK: - SessionError
 
@@ -37,8 +37,11 @@ public actor Session {
     private let output: FileHandle
 
     /// Pending bytes already read from `input` but not yet consumed as a
-    /// complete line. Kept as a `Data` to avoid repeatedly re-allocating.
-    private var readBuffer: Data = Data()
+    /// complete line. Bounded by `LineCodec.maxLineLength` plus one read.
+    private var readBuffer: [UInt8] = []
+    /// Set after an over-long line is rejected before its LF arrives: bytes
+    /// are dropped until the terminator so the tail is never parsed as a command.
+    private var skippingOverlongLine = false
 
     /// Set once `close()` has been called. Subsequent reads return EOF.
     private var isClosed: Bool = false
@@ -148,8 +151,7 @@ public actor Session {
         // the spec cap. The keystroke-driven quality path is best-effort;
         // returning 0 on overflow is safer than tripping the peer's
         // line-length check.
-        let candidateLength = candidate.withUnsafeBytes { $0.count }
-        if candidateLength > Self.maxQualityCandidateSourceBytes {
+        if candidate.count > Self.maxQualityCandidateSourceBytes {
             return 0
         }
 
@@ -158,28 +160,17 @@ public actor Session {
         // are the *escaped* form, which for ASCII passphrases is byte-
         // identical to the plaintext — keep them mlock'd and deinit-
         // zeroed all the way out.
-        try candidate.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
+        try candidate.withSpan { span in
             // Worst-case wire size: 16 prefix + 3*N + 1 LF.
-            let cap = 16 + buf.count * 3 + 1
-            let lineBuf = SecureBytes(capacity: Swift.max(cap, 1))
+            let cap = 16 + span.count * 3 + 1
+            let lineBuf = SecureBytes(capacity: cap)
             for b in "INQUIRE QUALITY ".utf8 {
                 lineBuf.append(b)
             }
-            // Inline data-line escape — same rules as Response.encodeDataLine
-            // so a literal '+' or space in the candidate round-trips
-            // through gpg-agent's quality estimator unchanged.
-            for b in buf {
-                switch b {
-                case 0x2B, 0x25, 0..<0x20, 0x7F...0xFF:
-                    lineBuf.append(0x25)
-                    let hi = b >> 4
-                    lineBuf.append(hi < 10 ? (0x30 + hi) : (0x41 + hi - 10))
-                    let lo = b & 0x0F
-                    lineBuf.append(lo < 10 ? (0x30 + lo) : (0x41 + lo - 10))
-                default:
-                    lineBuf.append(b)
-                }
-            }
+            // Same data-line escape as `Response`, so a literal '+' or
+            // space in the candidate round-trips through gpg-agent's
+            // quality estimator unchanged.
+            LineCodec.escapeForDataLine(span, into: lineBuf)
             lineBuf.append(0x0A)
             try writeSecure(lineBuf)
         }
@@ -247,98 +238,86 @@ public actor Session {
     private func readLine() throws -> String? {
         if isClosed { return nil }
         while true {
-            // Look for an LF in the already-buffered bytes. We index the
-            // buffer through a contiguous byte view to avoid any surprises
-            // from Data's potentially non-zero startIndex after a previous
-            // removeSubrange.
-            if let lfOffset = readBuffer.withUnsafeBytes({ buf -> Int? in
-                guard let base = buf.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                    return nil
+            if let lfOffset = readBuffer.firstIndex(of: 0x0A) {
+                if skippingOverlongLine {
+                    readBuffer.removeFirst(lfOffset + 1)
+                    skippingOverlongLine = false
+                    continue
                 }
-                for i in 0..<buf.count where base[i] == 0x0A {
-                    return i
-                }
-                return nil
-            }) {
-                if lfOffset > LineCodec.maxLineLength {
-                    throw SessionError.malformedLine("line exceeds \(LineCodec.maxLineLength) bytes")
-                }
-                // Pull out [0, lfOffset) as the line body, dropping a CR
-                // if the terminator was CRLF.
-                var endOffset = lfOffset
-                if endOffset > 0 {
-                    let lastByte: UInt8 = readBuffer.withUnsafeBytes { buf in
-                        let base = buf.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                        return base[endOffset - 1]
-                    }
-                    if lastByte == 0x0D {
-                        endOffset -= 1
-                    }
-                }
-                let lineData: Data = readBuffer.withUnsafeBytes { buf -> Data in
-                    let base = buf.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                    return Data(bytes: base, count: endOffset)
-                }
-                guard let s = String(data: lineData, encoding: .utf8) else {
-                    throw SessionError.malformedLine("invalid UTF-8")
-                }
-                // Drop "line + LF" from the buffer. Use a fresh Data backed
-                // by the remaining tail to keep startIndex at zero.
-                let consumed = lfOffset + 1
-                if consumed >= readBuffer.count {
-                    readBuffer = Data()
-                } else {
-                    let remaining: Data = readBuffer.withUnsafeBytes { buf -> Data in
-                        let base = buf.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                        return Data(bytes: base.advanced(by: consumed),
-                                    count: buf.count - consumed)
-                    }
-                    readBuffer = remaining
-                }
-                return s
+                return try takeLine(endingAtLF: lfOffset)
             }
 
             // No LF yet. Cap buffer size so a peer that never sends LF
             // can't exhaust memory.
-            if readBuffer.count > LineCodec.maxLineLength + 1 {
+            if skippingOverlongLine {
+                readBuffer.removeAll(keepingCapacity: true)
+            } else if readBuffer.count > LineCodec.maxLineLength + 1 {
+                readBuffer.removeAll(keepingCapacity: true)
+                skippingOverlongLine = true
                 throw SessionError.malformedLine("line exceeds \(LineCodec.maxLineLength) bytes")
             }
 
-            // Read more. Foundation's `FileHandle.read(upToCount:)` on a
-            // pipe loops internally until the buffer is full or EOF arrives,
-            // which deadlocks any line-oriented protocol where the peer
-            // sends short bursts and then waits for our reply. Drop down to
-            // the raw `read(2)` syscall so one call returns whatever the
-            // pipe currently has buffered.
-            let bufCap = 4096
-            var readData = Data(count: bufCap)
-            let nRead = readData.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Int in
-                guard let base = ptr.baseAddress else { return -1 }
-                return Darwin.read(input.fileDescriptor,
-                                   base.assumingMemoryBound(to: UInt8.self),
-                                   bufCap)
+            let chunk = try readChunk()
+            if chunk.isEmpty {
+                return try takeTrailingLine()
             }
-            if nRead < 0 {
-                throw SessionError.ioError(errno: errno)
-            }
-            let chunk: Data? = nRead == 0 ? nil : readData.prefix(nRead)
-            guard let data = chunk, !data.isEmpty else {
-                // EOF.
-                if readBuffer.isEmpty {
-                    return nil
-                }
-                // Treat trailing-no-LF as a final line.
-                if readBuffer.count > LineCodec.maxLineLength {
-                    throw SessionError.malformedLine("line exceeds \(LineCodec.maxLineLength) bytes")
-                }
-                guard let s = String(data: readBuffer, encoding: .utf8) else {
-                    throw SessionError.malformedLine("invalid UTF-8")
-                }
-                readBuffer.removeAll(keepingCapacity: false)
-                return s
-            }
-            readBuffer.append(data)
+            readBuffer.append(contentsOf: chunk)
         }
+    }
+
+    /// Remove and return the line that ends at `lfOffset` (the index of its
+    /// LF), dropping a CR if the terminator was CRLF. The line is consumed even
+    /// when it is rejected, so one bad line cannot make every later read fail.
+    private func takeLine(endingAtLF lfOffset: Int) throws -> String {
+        defer { readBuffer.removeFirst(lfOffset + 1) }
+        if lfOffset > LineCodec.maxLineLength {
+            throw SessionError.malformedLine("line exceeds \(LineCodec.maxLineLength) bytes")
+        }
+        var endOffset = lfOffset
+        if endOffset > 0, readBuffer[endOffset - 1] == 0x0D {
+            endOffset -= 1
+        }
+        guard let line = String(bytes: readBuffer[..<endOffset], encoding: .utf8) else {
+            throw SessionError.malformedLine("invalid UTF-8")
+        }
+        return line
+    }
+
+    /// At EOF, treat buffered bytes without a terminating LF as a final
+    /// line. Returns `nil` if nothing is buffered.
+    private func takeTrailingLine() throws -> String? {
+        if readBuffer.isEmpty {
+            return nil
+        }
+        defer { readBuffer.removeAll(keepingCapacity: false) }
+        if readBuffer.count > LineCodec.maxLineLength {
+            throw SessionError.malformedLine("line exceeds \(LineCodec.maxLineLength) bytes")
+        }
+        guard let line = String(bytes: readBuffer, encoding: .utf8) else {
+            throw SessionError.malformedLine("invalid UTF-8")
+        }
+        return line
+    }
+
+    /// Read whatever the input currently has, up to 4 KiB; empty on EOF.
+    ///
+    /// Foundation's `FileHandle.read(upToCount:)` on a pipe loops internally
+    /// until the buffer is full or EOF arrives, which deadlocks any
+    /// line-oriented protocol where the peer sends short bursts and then
+    /// waits for our reply. Drop down to the raw `read(2)` syscall so one
+    /// call returns whatever the pipe currently has buffered.
+    private func readChunk() throws -> [UInt8] {
+        let fd = input.fileDescriptor
+        var chunk = [UInt8](repeating: 0, count: 4096)
+        let nRead = chunk.withUnsafeMutableBytes { raw in
+            // `raw` covers exactly `chunk`, so read(2) cannot write past it.
+            unsafe Darwin.read(fd, raw.baseAddress, raw.count)
+        }
+        if nRead < 0 {
+            throw SessionError.ioError(errno: errno)
+        }
+        chunk.removeSubrange(nRead...)
+        return chunk
     }
 
     /// Write `data` in full to `output`. The Foundation `write(contentsOf:)`
@@ -355,15 +334,16 @@ public actor Session {
     /// Write secret wire bytes directly from SecureBytes without first
     /// materialising them in Foundation.Data heap.
     private func writeSecure(_ secure: SecureBytes) throws {
-        try secure.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
-            guard let base = buf.baseAddress else { return }
+        let fd = output.fileDescriptor
+        try secure.withSpan { span in
             var written = 0
-            while written < buf.count {
-                let n = Darwin.write(
-                    output.fileDescriptor,
-                    base.advanced(by: written),
-                    buf.count - written
-                )
+            while written < span.count {
+                let n = span.withUnsafeBufferPointer { buf in
+                    // `written < buf.count`, so the offset pointer and the
+                    // remaining length stay inside the span.
+                    let start = unsafe buf.baseAddress.map { unsafe $0 + written }
+                    return unsafe Darwin.write(fd, start, buf.count - written)
+                }
                 if n < 0 {
                     if errno == EINTR {
                         continue

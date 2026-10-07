@@ -8,7 +8,7 @@
 // to the `PinentryCoordinator`.
 
 import Foundation
-import SecureMemory
+public import SecureMemory
 
 // MARK: - DialogSpec
 

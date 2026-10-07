@@ -105,4 +105,43 @@ final class RealProcessRunnerTests: XCTestCase {
         // be swallowed by the guard rather than crash the process.
         try await Task.sleep(for: .milliseconds(400))
     }
+
+    // A runaway child must not exhaust memory: output beyond the cap is
+    // dropped, yet the child is still drained to EOF so it exits normally.
+    func testOutputIsCappedButChildStillExits() async throws {
+        let runner = RealProcessRunner()
+        let result = try await runner.run(
+            executable: "/bin/dd",
+            arguments: ["if=/dev/zero", "bs=1048576", "count=3", "status=none"],
+            stdin: nil,
+            timeout: .seconds(30)
+        )
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.stdout.utf8.count, RealProcessRunner.maxCapturedBytes)
+    }
+
+    func testStdinIsDeliveredToChild() async throws {
+        let runner = RealProcessRunner()
+        let result = try await runner.run(
+            executable: "/bin/cat",
+            arguments: [],
+            stdin: Data("hello stdin".utf8),
+            timeout: .seconds(30)
+        )
+        XCTAssertEqual(result.exitCode, 0)
+        XCTAssertEqual(result.stdout, "hello stdin")
+    }
+
+    // Writing stdin to a child that has already exited used to raise an
+    // uncatchable Objective-C exception (EPIPE) and kill the process.
+    func testStdinWriteToExitedChildDoesNotCrash() async throws {
+        let runner = RealProcessRunner()
+        let result = try await runner.run(
+            executable: "/usr/bin/true",
+            arguments: [],
+            stdin: Data(count: 1 << 20),
+            timeout: .seconds(30)
+        )
+        XCTAssertEqual(result.exitCode, 0)
+    }
 }

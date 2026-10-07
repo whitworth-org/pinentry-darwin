@@ -8,29 +8,40 @@
 
 import AppKit
 import SwiftUI
-import KeychainStore
-import SecureMemory
+public import KeychainStore
 
 @MainActor
 public final class PinentryCoordinator {
 
     private let userPrefs: UserPrefs
-    private let uiSettings: UISettings
+    private let settingsStore: UISettingsStore
 
     public init(
         userPrefs: UserPrefs = UserPrefs(),
-        uiSettings: UISettings = UISettings()
+        settingsStore: UISettingsStore = UISettingsStore()
     ) {
         self.userPrefs = userPrefs
-        self.uiSettings = uiSettings
+        self.settingsStore = settingsStore
     }
 
     /// Show the dialog implied by `spec` and suspend until the user (or
-    /// the timeout) resolves it. Resumed exactly once.
+    /// the timeout) resolves it. Resumed exactly once. UI settings are
+    /// read at every call, so a change made in Settings applies to the
+    /// next dialog of a long-lived process without a restart.
     public func present(_ spec: DialogSpec) async -> DialogResult {
-        await withCheckedContinuation { (cont: CheckedContinuation<DialogResult, Never>) in
-            self.show(spec: spec, continuation: cont)
+        let settings = await settingsStore.load()
+        return await withCheckedContinuation {
+            (cont: CheckedContinuation<DialogResult, Never>) in
+            self.show(spec: spec, settings: settings, continuation: cont)
         }
+    }
+
+    /// The dialog timeout: gpg-agent's SETTIMEOUT when it sent one (0 means
+    /// "none", and wins over the fallback), else the configured default.
+    /// `nil` means no timeout.
+    static func effectiveTimeout(requested: Int?, fallback: Int) -> TimeInterval? {
+        let seconds = requested ?? fallback
+        return seconds > 0 ? TimeInterval(seconds) : nil
     }
 
     // MARK: - Internals
@@ -46,10 +57,10 @@ public final class PinentryCoordinator {
         // ordered-in, but holding our own ref until resolution is
         // defensive against early dealloc.
         var window: NSWindow?
-        /// Timeout source. Timer is RunLoop-driven so it fires reliably
-        /// from inside `NSApp.runModal`'s event loop; a Task with
-        /// `Task.sleep` would compete with the modal's main-actor
-        /// hold and could delay or fail to fire.
+        /// Timeout source, scheduled by `scheduleTimeout` so it fires inside
+        /// `NSApp.runModal`'s event loop; a Task with `Task.sleep` would
+        /// compete with the modal's main-actor hold and could delay or fail
+        /// to fire.
         var timeoutTimer: Timer?
 
         init(_ continuation: CheckedContinuation<DialogResult, Never>) {
@@ -87,6 +98,7 @@ public final class PinentryCoordinator {
 
     private func show(
         spec: DialogSpec,
+        settings: UISettings,
         continuation: CheckedContinuation<DialogResult, Never>
     ) {
         let resolver = Resolver(continuation)
@@ -104,25 +116,25 @@ public final class PinentryCoordinator {
                     resolver.resolve(result)
                 }
             )
-            let root = applyTheme(PinView(
+            let root = PinView(
                 spec: spec,
                 model: model,
-                secureKeyboardEntry: uiSettings.secureKeyboardEntry,
-                clearPasteboardOnSubmit: uiSettings.clearPasteboardOnSubmit
-            ))
-            window = makePinentryWindow(rootView: root, title: spec.title)
+                secureKeyboardEntry: settings.secureKeyboardEntry,
+                clearPasteboardOnSubmit: settings.clearPasteboardOnSubmit
+            )
+            window = makePinentryWindow(rootView: root, title: spec.title, theme: settings.theme)
 
         case .confirm:
-            let root = applyTheme(ConfirmView(spec: spec) { [resolver] result in
+            let root = ConfirmView(spec: spec) { [resolver] result in
                 resolver.resolve(result)
-            })
-            window = makePinentryWindow(rootView: root, title: spec.title)
+            }
+            window = makePinentryWindow(rootView: root, title: spec.title, theme: settings.theme)
 
         case .message:
-            let root = applyTheme(MessageView(spec: spec) { [resolver] result in
+            let root = MessageView(spec: spec) { [resolver] result in
                 resolver.resolve(result)
-            })
-            window = makePinentryWindow(rootView: root, title: spec.title)
+            }
+            window = makePinentryWindow(rootView: root, title: spec.title, theme: settings.theme)
         }
 
         // Tell the window what to do on red-button close.
@@ -137,21 +149,14 @@ public final class PinentryCoordinator {
         window.center()
         NSApp.activate(ignoringOtherApps: true)
 
-        // Apply timeout if requested. SETTIMEOUT 0 means "no timeout".
-        // Timer (not Task.sleep) so the source is RunLoop-pumped under
-        // NSApp.runModal — the modal session does not reliably yield
-        // the main-actor scheduler that backs Task.sleep, so a Task
-        // would risk firing late or not at all.
-        if let seconds = spec.timeoutSeconds, seconds > 0 {
-            let timer = Timer.scheduledTimer(
-                withTimeInterval: TimeInterval(seconds),
-                repeats: false
-            ) { [resolver] _ in
-                MainActor.assumeIsolated {
-                    resolver.resolve(.timedOut)
-                }
+        let timeout = Self.effectiveTimeout(
+            requested: spec.timeoutSeconds,
+            fallback: settings.defaultTimeout
+        )
+        if let timeout {
+            resolver.timeoutTimer = Self.scheduleTimeout(after: timeout) {
+                resolver.resolve(.timedOut)
             }
-            resolver.timeoutTimer = timer
         }
 
         // Drive a true app-modal session. Compared to the previous
@@ -171,18 +176,18 @@ public final class PinentryCoordinator {
         NSApp.runModal(for: window)
     }
 
-    /// Apply the theme override (if any). System mode never sets
-    /// `.preferredColorScheme` so the window inherits live changes from
-    /// `NSApp.effectiveAppearance`.
-    @ViewBuilder
-    private func applyTheme<V: View>(_ root: V) -> some View {
-        switch uiSettings.theme {
-        case .system:
-            root
-        case .light:
-            root.preferredColorScheme(.light)
-        case .dark:
-            root.preferredColorScheme(.dark)
+    /// Schedule a one-shot timer that fires in every run-loop mode, including
+    /// the modal-panel mode `NSApp.runModal(for:)` spins in. A timer in the
+    /// default mode only (`Timer.scheduledTimer`) is starved for the whole
+    /// modal session, so SETTIMEOUT would never fire while the dialog is up.
+    static func scheduleTimeout(
+        after interval: TimeInterval,
+        _ fire: @escaping @MainActor () -> Void
+    ) -> Timer {
+        let timer = Timer(timeInterval: interval, repeats: false) { _ in
+            MainActor.assumeIsolated { fire() }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
     }
 }

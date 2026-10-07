@@ -5,97 +5,34 @@
 // Two flavours: regular (Cancel / [NotOK] / OK) and `--one-button` which
 // renders only an OK acknowledgement.
 //
-// Visual: matches PinView's header rhythm (icon → title → description)
-// for consistency, but uses `exclamationmark.shield.fill` instead of the
-// lock icon to signal "decision required" rather than "secret entry".
+// Same layout as PinView (DialogScaffold); the shield-with-exclamation icon
+// signals "decision required" rather than "secret entry".
 
-import SwiftUI
+public import SwiftUI
 
 public struct ConfirmView: View {
     public let spec: DialogSpec
     public let onResult: @MainActor (DialogResult) -> Void
-
-    @State private var appeared: Bool = false
 
     public init(spec: DialogSpec, onResult: @escaping @MainActor (DialogResult) -> Void) {
         self.spec = spec
         self.onResult = onResult
     }
 
+    private var oneButton: Bool {
+        if case .confirm(let oneButton) = spec.kind { return oneButton }
+        return false
+    }
+
     public var body: some View {
-        VStack(alignment: .leading, spacing: Theme.blockPadding) {
-            VStack(alignment: .leading, spacing: Theme.mediumPadding) {
-
-                Image(systemName: "exclamationmark.shield.fill")
-                    .font(.system(size: Theme.headerIconSize, weight: .semibold))
-                    .foregroundStyle(Theme.accent)
-                    .accessibilityHidden(true)
-
-                // Text(verbatim:): the spec.* strings are
-                // attacker-controlled (from gpg-agent SET* lines).
-                // The verbatim init forces the String overload of
-                // Text and prevents any future literal-with-
-                // interpolation refactor from accidentally flipping
-                // to LocalizedStringKey + markdown interpretation.
-                if let err = spec.error, !err.isEmpty {
-                    Text(verbatim: err)
-                        .font(Theme.bodyFont)
-                        .foregroundStyle(Theme.errorText)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if let title = spec.title, !title.isEmpty {
-                    Text(verbatim: title)
-                        .font(Theme.titleFont)
-                        .foregroundStyle(Color.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                if let desc = spec.description, !desc.isEmpty {
-                    Text(verbatim: desc)
-                        .font(Theme.bodyFont)
-                        .foregroundStyle(Color.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                }
+        DialogScaffold(symbol: "exclamationmark.shield.fill") {
+            DialogTextBlock(spec: spec)
+            if let error = spec.error.nonEmpty {
+                StatusLine(tone: .error, text: error)
             }
-
-            HStack(spacing: Theme.smallPadding) {
-                Spacer()
-                if case .confirm(let oneButton) = spec.kind, oneButton {
-                    Button(spec.resolvedOK) {
-                        onResult(.confirmed)
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(PrimaryButtonStyle())
-                } else {
-                    Button(spec.resolvedCancel) {
-                        onResult(.canceled)
-                    }
-                    .keyboardShortcut(.cancelAction)
-
-                    if let notOK = spec.notOKLabel, !notOK.isEmpty {
-                        Button(notOK) {
-                            onResult(.notConfirmed)
-                        }
-                    }
-
-                    Button(spec.resolvedOK) {
-                        onResult(.confirmed)
-                    }
-                    .keyboardShortcut(.defaultAction)
-                    .buttonStyle(PrimaryButtonStyle())
-                }
-            }
-        }
-        .padding(.horizontal, Theme.largePadding)
-        .padding(.vertical, Theme.blockPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .opacity(appeared ? 1 : 0)
-        .offset(y: appeared ? 0 : Theme.entranceTranslate)
-        .onAppear {
-            withAnimation(.easeOut(duration: Theme.entranceDuration)) {
-                appeared = true
+        } footer: {
+            DialogButtonRow(spec: spec, oneButton: oneButton) { role in
+                onResult(role.confirmResult)
             }
         }
     }

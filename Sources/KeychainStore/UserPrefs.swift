@@ -15,9 +15,7 @@
 //                       else gpgtools ShowPassphrase,
 //                       else false.
 
-import Foundation
-import Security
-import SecureMemory
+public import Foundation
 
 // MARK: - Keys
 

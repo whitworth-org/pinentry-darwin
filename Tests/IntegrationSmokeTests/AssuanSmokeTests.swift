@@ -22,8 +22,9 @@
 // If the binary is missing the test is skipped, not failed — so
 // `swift test` works on a fresh clone before `make build` has run.
 
-import XCTest
 import Foundation
+import Synchronization
+import XCTest
 
 final class AssuanSmokeTests: XCTestCase {
 
@@ -76,15 +77,23 @@ final class AssuanSmokeTests: XCTestCase {
         return nil
     }
 
+    private func requireBinary() throws -> URL {
+        guard let binary = locateBinary() else {
+            throw XCTSkip(
+                "smoke target requires `make build`; set PINENTRY_DARWIN_SMOKE_BINARY to override"
+            )
+        }
+        return binary
+    }
+
     // MARK: - Test
 
     func testAssuanWireProtocolSmoke() throws {
-        guard let binary = locateBinary() else {
-            throw XCTSkip("smoke target requires `make build`; set PINENTRY_DARWIN_SMOKE_BINARY to override")
-        }
+        let binary = try requireBinary()
 
-        let result = try runBinary(binary, stdin: Self.transcript)
+        let result = try runBinary(binary, stdin: Data(Self.transcript.utf8))
 
+        XCTAssertFalse(result.timedOut, "pinentry-darwin did not exit; stdout:\n\(result.stdout)")
         XCTAssertEqual(result.exitCode, 0, "pinentry-darwin exited \(result.exitCode); stdout:\n\(result.stdout)")
 
         let stdout = result.stdout
@@ -138,34 +147,74 @@ final class AssuanSmokeTests: XCTestCase {
         }
     }
 
+    // A line the session cannot decode (invalid UTF-8) is reported as
+    // malformed. The loop must answer with a bounded number of ERR lines and
+    // then terminate; it must never spin re-reading the same bytes.
+    func testUndecodableLineDoesNotWedgeSession() throws {
+        let binary = try requireBinary()
+        var input = Data("SETDESC ".utf8)
+        input.append(contentsOf: [0xFF, 0xFE, 0x0A])
+        input.append(Data("GETINFO flavor\nBYE\n".utf8))
+
+        let result = try runBinary(binary, stdin: input, timeout: 15)
+
+        XCTAssertFalse(result.timedOut, "session wedged on an undecodable line")
+        let errCount = result.stdout.split(separator: "\n").filter { $0.hasPrefix("ERR ") }.count
+        XCTAssertGreaterThanOrEqual(errCount, 1, "the bad line must be answered with ERR")
+        XCTAssertLessThanOrEqual(errCount, 16, "ERR replies must be bounded; got \(errCount)")
+    }
+
     // MARK: - Helpers
 
     private struct RunResult {
         let exitCode: Int32
         let stdout: String
+        let timedOut: Bool
     }
 
-    private func runBinary(_ url: URL, stdin: String) throws -> RunResult {
+    /// Run the binary with `stdin` piped in and collect stdout. A child that
+    /// has not exited after `timeout` seconds is terminated and reported via
+    /// `timedOut`, so a wedged session fails the test instead of hanging it.
+    /// Stdout is drained while the child runs and capped at 1 MiB.
+    private func runBinary(
+        _ url: URL,
+        stdin: Data,
+        timeout: TimeInterval = 30
+    ) throws -> RunResult {
         let proc = Process()
         proc.executableURL = url
         let outPipe = Pipe()
-        let errPipe = Pipe()
         let inPipe = Pipe()
         proc.standardOutput = outPipe
-        proc.standardError = errPipe
+        proc.standardError = FileHandle.nullDevice
         proc.standardInput = inPipe
-        try proc.run()
-        if let data = stdin.data(using: .utf8) {
-            inPipe.fileHandleForWriting.write(data)
+
+        let collected = Mutex(Data())
+        outPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            collected.withLock { buffer in
+                if buffer.count < 1 << 20 { buffer.append(chunk) }
+            }
         }
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
+
+        try proc.run()
+        try inPipe.fileHandleForWriting.write(contentsOf: stdin)
         try inPipe.fileHandleForWriting.close()
-        proc.waitUntilExit()
-        let outData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
-        _ = try? errPipe.fileHandleForReading.readToEnd()  // drained, ignored
-        return RunResult(
-            exitCode: proc.terminationStatus,
-            stdout: String(decoding: outData, as: UTF8.self)
-        )
+
+        let timedOut = exited.wait(timeout: .now() + timeout) == .timedOut
+        if timedOut {
+            proc.terminate()
+            exited.wait()
+        }
+        outPipe.fileHandleForReading.readabilityHandler = nil
+        let tail = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
+        let stdout = collected.withLock { buffer in
+            buffer.append(tail)
+            return String(decoding: buffer, as: UTF8.self)
+        }
+        return RunResult(exitCode: proc.terminationStatus, stdout: stdout, timedOut: timedOut)
     }
 
     /// `D X.Y.Z` where each component is one or more digits.

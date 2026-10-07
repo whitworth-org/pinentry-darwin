@@ -3,20 +3,15 @@
 //
 // PinView.swift — the SwiftUI body for `GETPIN`.
 //
-// Layout direction (post-pinentry-mac-comparison): landscape dialog with
-// a large iconographic anchor on the LEFT and the content stack on the
-// RIGHT. Mirrors pinentry-mac's information-density (which the user
-// validated as "the correct window size") while replacing pinentry-mac's
-// dated padlock illustration with a modern SF Symbol and trimming the
-// titlebar text. PIN label is inline with the field; Show typing is a
-// checkbox indented under the field.
+// Layout: the shared DialogScaffold (icon left, content right). Prompt labels
+// and fields sit in a Grid so labels of any length stay aligned; the option
+// checkboxes, SETERROR and the repeat-status line align under the fields.
 //
 // See PinViewModel for the SwiftUI String / SecureBytes residue caveat.
 
 import Observation
-import SwiftUI
+public import SwiftUI
 import KeychainStore
-import SecureMemory
 
 public struct PinView: View {
     public let spec: DialogSpec
@@ -42,8 +37,11 @@ public struct PinView: View {
     @State private var pinText: String = ""
     @State private var repeatText: String = ""
 
-    /// Drives the entrance animation (alpha 0→1, translateY 8→0).
-    @State private var appeared: Bool = false
+    /// Set when Return is pressed while OK is disabled, so a too-short repeat
+    /// is reported as a mismatch instead of leaving Return silently ignored.
+    @State private var submitAttempted: Bool = false
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// True between our `enable()` and the matching `disable()`. Tracked
     /// per-instance so a view that's torn down without `.onDisappear`
@@ -72,347 +70,244 @@ public struct PinView: View {
     }
 
     public var body: some View {
-        // Two-column landscape layout: hero icon left, content stack right.
-        HStack(alignment: .top, spacing: Theme.blockPadding) {
-            heroIcon
-            contentColumn
-        }
-        .padding(.horizontal, Theme.largePadding)
-        .padding(.vertical, Theme.blockPadding)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .opacity(appeared ? 1 : 0)
-        .offset(y: appeared ? 0 : Theme.entranceTranslate)
-        .onAppear {
-            // Engage secure keyboard entry as the very first thing —
-            // before the field gets focus, before the animation runs —
-            // so no keystroke can land in an unprotected window. Skipped
-            // if the user disabled it in Settings.
-            if secureKeyboardEntry, SecureInput.enable() {
-                skeActive = true
-            }
-
-            // Snapshot the pasteboard change-count so we can detect a
-            // paste-fill on submit without ever inspecting clipboard
-            // contents.
-            pasteboardBaseline = PasteboardGuard.snapshot()
-
-            // The pin field carries `becomesFirstResponderOnAppear: true`
-            // so AppKit grabs focus the moment it mounts; no SwiftUI
-            // FocusState plumbing required.
-
-            withAnimation(.easeOut(duration: Theme.entranceDuration)) {
-                appeared = true
-            }
-        }
-        .onDisappear {
-            // Balance our SKE enable. Process termination would clean
-            // this up automatically (kernel-level refcount drops at
-            // exit), but disabling promptly removes the menu-bar lock
-            // badge while the process is still doing post-dialog work.
-            if skeActive {
-                SecureInput.disable()
-                skeActive = false
-            }
-
-            // L-3(b): clear the SwiftUI text-storage scratch on every
-            // resolution path. The window always closes on resolve (OK,
-            // cancel, close, timeout) which fires onDisappear, so this is
-            // the single choke point that covers all four. This only
-            // shortens the residue window — the prior per-keystroke String
-            // copies SwiftUI made are already unwipeable; that residual is
-            // documented in PinViewModel and accepted for v1.0.0.
-            pinText = ""
-            repeatText = ""
-
-            // L-5: clear the pasteboard on the abandonment paths too —
-            // cancel, red-X close, and timeout never route through
-            // handleSubmit(), so a paste-filled passphrase would otherwise
-            // linger on NSPasteboard.general after the dialog is gone.
-            // Gated on the SAME clearPasteboardOnSubmit opt-in and the same
-            // changeCount baseline as the submit path; idempotent, so the
-            // OK path (which already cleared in handleSubmit) is unharmed.
-            // We never read pasteboard contents — only whether the count
-            // advanced during the dialog's lifetime.
-            PasteboardGuard.clearIfAdvanced(
-                since: pasteboardBaseline,
-                enabled: clearPasteboardOnSubmit
-            )
-        }
-    }
-
-    // MARK: - Sub-blocks
-
-    /// Left column: oversized SF Symbol acting as the dialog's identity.
-    /// Sized to anchor against the title + multi-line description.
-    @ViewBuilder
-    private var heroIcon: some View {
-        Image(systemName: "lock.shield.fill")
-            .font(.system(size: Theme.heroIconSize, weight: .regular))
-            .foregroundStyle(Theme.accent)
-            .frame(width: Theme.heroIconSize + 8, alignment: .top)
-            .accessibilityHidden(true)
-    }
-
-    /// Right column: title → description → input row → indented options →
-    /// button row. Fills the remaining width.
-    @ViewBuilder
-    private var contentColumn: some View {
-        VStack(alignment: .leading, spacing: Theme.smallPadding) {
-
-            // Title (SETTITLE) — primary heading. Text(verbatim:) is
-            // load-bearing: the spec.* strings are attacker-controlled
-            // (they come from gpg-agent SET* lines). Plain Text("…")
-            // for a runtime String already resolves to the
-            // String overload and renders verbatim today, but a
-            // future refactor that introduces literal interpolation
-            // (e.g. Text("Title: \(title)")) flips to the
-            // LocalizedStringKey overload, which interprets markdown
-            // and link syntax in the interpolated value. The
-            // verbatim init makes the safe contract explicit and
-            // unfailable.
-            if let title = spec.title, !title.isEmpty {
-                Text(verbatim: title)
-                    .font(Theme.titleFont)
-                    .foregroundStyle(Color.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            // SETERROR text, if any. Most urgent thing on screen when
-            // present, kept adjacent to the title.
-            if let err = spec.error, !err.isEmpty {
-                Text(verbatim: err)
-                    .font(Theme.bodyFont)
-                    .foregroundStyle(Theme.errorText)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            // SETDESC text. Multi-line: gpg-agent often packs Number /
-            // Holder / Counter rows into a single description for card
-            // dialogs, separated by newlines. We render verbatim so the
-            // rich smartcard context shows up the same way pinentry-mac
-            // displays it.
-            if let desc = spec.description, !desc.isEmpty {
-                Text(verbatim: desc)
-                    .font(Theme.bodyFont)
-                    .foregroundStyle(Color.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-            }
-
-            // SETKEYINFO fingerprint, when supplied (non-card flows).
-            // Rendered monospace so users can compare hex digit-for-digit.
-            if case let .key(mode, fpr) = spec.keyInfo {
-                Text(verbatim: formatKeyInfoLabel(mode: mode, fingerprint: fpr))
-                    .font(Theme.monospacedFont)
-                    .foregroundStyle(Color.secondary)
-                    .textSelection(.enabled)
-                    .accessibilityLabel(Text(verbatim: "Key fingerprint \(fpr)"))
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            // PIN input row: prompt label inline with the field. Matches
-            // pinentry-mac's "PIN  [____________]" affordance.
-            inputRow
-
-            // Optional repeat field (SETREPEAT).
-            if let repeatPrompt = spec.repeatPrompt {
-                repeatRow(label: repeatPrompt)
-
-                if !model.pinsMatch && model.repeatLength > 0 {
-                    Text(verbatim: spec.repeatError ?? "Passphrases do not match.")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Theme.errorText)
-                        .padding(.leading, Theme.fieldLabelColumnWidth + Theme.smallPadding)
-                        .transition(.opacity)
+        DialogScaffold(symbol: "lock.shield.fill") {
+            DialogTextBlock(spec: spec)
+            fieldGrid
+        } footer: {
+            DialogButtonRow(
+                spec: spec,
+                oneButton: false,
+                okEnabled: model.canSubmit,
+                isBusy: model.isSubmitting
+            ) { role in
+                switch role {
+                case .ok: handleSubmit()
+                // NotOK on a GETPIN is unusual but the protocol permits it.
+                // Treated as a non-confirmation result.
+                case .cancel, .notOK: model.cancel()
                 }
             }
-
-            // Indented options row: Show typing toggle (and optional
-            // Save in Keychain checkbox). Indented by the same column
-            // width as the field so the controls visually align under
-            // the input.
-            optionsRow
-
-            Spacer(minLength: 0)
-
-            buttonRow
         }
-    }
-
-    /// Format a SETKEYINFO mode + fingerprint into a humane label.
-    /// Conventions:
-    ///   - 40-hex-char SHA-1 fingerprints render as
-    ///     `1EA9 3FE7 B663 8F3C 6B6E  9C5C 2ABD 2764 D9D7 175C`
-    ///     (groups of four with a double space at the midpoint — the
-    ///     canonical `gpg --fingerprint` output style).
-    ///   - Mode 'c' (card-resident key) prefixes "Card key:".
-    ///   - Other modes ('n' normal, 's' ssh, 'o' obsolete) render
-    ///     without prefix.
-    private func formatKeyInfoLabel(mode: Character, fingerprint fpr: String) -> String {
-        let hex = fpr.uppercased()
-        let formatted: String
-        if hex.count == 40, hex.allSatisfy(\.isHexDigit) {
-            var pieces: [String] = []
-            for chunkStart in stride(from: 0, to: 40, by: 4) {
-                let lo = hex.index(hex.startIndex, offsetBy: chunkStart)
-                let hi = hex.index(lo, offsetBy: 4)
-                pieces.append(String(hex[lo..<hi]))
+        .onAppear(perform: engageProtections)
+        .onDisappear(perform: releaseProtections)
+        .onChange(of: fieldStatus) { _, status in
+            if let message = status.message(for: spec) {
+                AccessibilityNotification.Announcement(message).post()
             }
-            formatted = pieces.prefix(5).joined(separator: " ") + "  " + pieces.suffix(5).joined(separator: " ")
-        } else {
-            formatted = fpr
-        }
-        switch mode {
-        case "c": return "Card key:  \(formatted)"
-        case "s": return "SSH key:   \(formatted)"
-        default:  return formatted
         }
     }
 
-    /// Prompt label + field on the same row. Label is right-aligned in a
-    /// fixed-width column so multi-row labels (e.g. with a repeat field)
-    /// stay vertically aligned.
-    @ViewBuilder
-    private var inputRow: some View {
-        HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding) {
-            Text(verbatim: spec.resolvedPrompt)
-                .font(Theme.bodyFont)
-                .foregroundStyle(Color.primary)
-                .frame(width: Theme.fieldLabelColumnWidth, alignment: .trailing)
+    /// Engage secure keyboard entry as the very first thing, before the field
+    /// gets focus, so no keystroke can land in an unprotected window. Skipped
+    /// if the user disabled it in Settings.
+    private func engageProtections() {
+        if secureKeyboardEntry, SecureInput.enable() {
+            skeActive = true
+        }
 
-            pinField(
+        // Snapshot the pasteboard change-count so we can detect a paste-fill
+        // on submit without ever inspecting clipboard contents.
+        pasteboardBaseline = PasteboardGuard.snapshot()
+
+        // The pin field carries `becomesFirstResponderOnAppear: true` so AppKit
+        // grabs focus the moment it mounts; no SwiftUI FocusState plumbing.
+    }
+
+    private func releaseProtections() {
+        // Balance our SKE enable. Process termination would clean this up
+        // automatically (kernel-level refcount drops at exit), but disabling
+        // promptly removes the menu-bar lock badge while the process is still
+        // doing post-dialog work.
+        if skeActive {
+            SecureInput.disable()
+            skeActive = false
+        }
+
+        // L-3(b): clear the SwiftUI text-storage scratch on every resolution
+        // path. The window always closes on resolve (OK, cancel, close,
+        // timeout) which fires onDisappear, so this is the single choke point
+        // that covers all four. This only shortens the residue window: the
+        // prior per-keystroke String copies SwiftUI made are already
+        // unwipeable; that residual is documented in PinViewModel and accepted
+        // for v1.0.0.
+        pinText = ""
+        repeatText = ""
+
+        // L-5: clear the pasteboard on the abandonment paths too. Cancel,
+        // red-X close, and timeout never route through handleSubmit(), so a
+        // paste-filled passphrase would otherwise linger on NSPasteboard.general
+        // after the dialog is gone. Gated on the SAME clearPasteboardOnSubmit
+        // opt-in and the same changeCount baseline as the submit path;
+        // idempotent, so the OK path (which already cleared in handleSubmit) is
+        // unharmed. We never read pasteboard contents, only whether the count
+        // advanced during the dialog's lifetime.
+        PasteboardGuard.clearIfAdvanced(
+            since: pasteboardBaseline,
+            enabled: clearPasteboardOnSubmit
+        )
+    }
+
+    // MARK: - Field grid
+
+    private var fieldStatus: FieldStatus {
+        FieldStatus.evaluate(
+            pinLength: model.pinLength,
+            repeatLength: model.repeatLength,
+            pinsMatch: model.pinsMatch,
+            truncated: model.pinTruncated || model.repeatTruncated,
+            submitAttempted: submitAttempted
+        )
+    }
+
+    /// Prompt labels in one column, fields in the other. Rows without a label
+    /// reserve the label column so their content lines up under the fields.
+    private var fieldGrid: some View {
+        VStack(alignment: .leading, spacing: Theme.smallPadding) {
+            if let error = spec.error.nonEmpty {
+                indentedRow { StatusLine(tone: .error, text: error) }
+            }
+            fieldRow(
+                label: spec.resolvedPrompt,
                 binding: $pinText,
-                onChange: { model.setPin(from: $0) },
-                accessibilityLabel: spec.resolvedPrompt,
+                hint: spec.error.nonEmpty,
                 isPinRow: true
             )
+            if let repeatPrompt = spec.repeatPrompt {
+                fieldRow(
+                    label: repeatPrompt,
+                    binding: $repeatText,
+                    hint: "Enter the passphrase again.",
+                    isPinRow: false
+                )
+            }
+            if spec.repeatPrompt != nil || fieldStatus != .hidden {
+                indentedRow { statusSlot }
+            }
+            indentedRow { optionsColumn }
         }
-        .padding(.top, Theme.smallPadding)
     }
 
-    @ViewBuilder
-    private func repeatRow(label: String) -> some View {
+    /// Invisible stack of every label, so each row's label cell is as wide as
+    /// the widest one without a fixed column width.
+    private var labelSizer: some View {
+        let labels = [spec.resolvedPrompt] + (spec.repeatPrompt.map { [$0] } ?? [])
+        return ZStack(alignment: .trailing) {
+            ForEach(Array(labels.enumerated()), id: \.offset) { _, label in
+                Text(verbatim: label).font(Theme.bodyFont)
+            }
+        }
+        .hidden()
+        .accessibilityHidden(true)
+    }
+
+    /// The label sizer also gives the row a one-line minimum height, so a
+    /// status line appearing or disappearing never moves the rows below it.
+    private func indentedRow<Content: View>(
+        @ViewBuilder _ content: () -> Content
+    ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding) {
-            Text(verbatim: label)
-                .font(Theme.bodyFont)
-                .foregroundStyle(Color.primary)
-                .frame(width: Theme.fieldLabelColumnWidth, alignment: .trailing)
+            labelSizer
+            content()
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func fieldRow(
+        label: String,
+        binding: Binding<String>,
+        hint: String?,
+        isPinRow: Bool
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Theme.smallPadding) {
+            ZStack(alignment: .trailing) {
+                labelSizer
+                Text(verbatim: label)
+                    .font(Theme.bodyFont)
+                    .accessibilityHidden(true)
+            }
 
             pinField(
-                binding: $repeatText,
-                onChange: { model.setRepeat(from: $0) },
+                binding: binding,
+                onChange: { value in
+                    if isPinRow { model.setPin(from: value) } else { model.setRepeat(from: value) }
+                },
                 accessibilityLabel: label,
-                isPinRow: false
+                accessibilityHint: hint,
+                isPinRow: isPinRow
             )
         }
     }
 
-    /// Show typing toggle, indented under the input field. Optionally
-    /// joined by the Save in Keychain checkbox when the dialog has a
-    /// Keychain affordance.
+    private var statusSlot: some View {
+        Group {
+            if let message = fieldStatus.message(for: spec) {
+                StatusLine(tone: fieldStatus.tone, text: message)
+                    .transition(.opacity)
+            }
+        }
+        .animation(
+            reduceMotion ? nil : .easeOut(duration: DialogStyle.statusFadeDuration),
+            value: fieldStatus
+        )
+    }
+
+    /// Show typing toggle, optionally joined by the Save in Keychain checkbox.
     ///
     /// KC-2 / FV-1: when the data-protection keychain has rejected this
     /// process for missing entitlement (typical for ad-hoc-signed builds:
     /// `swift run`, locally re-signed, third-party rebuild), the Save
-    /// affordance is disabled and a one-line caption explains why. We
-    /// read `KeychainStore.degradedPostureObserved` rather than reaching
-    /// into a global app-state mediator: the flag is a process-wide
-    /// monotonic Bool that flips at most once per process lifetime.
-    @ViewBuilder
-    private var optionsRow: some View {
+    /// affordance is disabled and a caption explains why. We read
+    /// `KeychainStore.degradedPostureObserved` rather than reaching into a
+    /// global app-state mediator: the flag is a process-wide monotonic Bool
+    /// that flips at most once per process lifetime.
+    private var optionsColumn: some View {
         let degraded = KeychainStore.degradedPostureObserved
-        VStack(alignment: .leading, spacing: 2) {
+        return VStack(alignment: .leading, spacing: Theme.smallPadding) {
             HStack(spacing: Theme.blockPadding) {
                 Toggle("Show typing", isOn: $model.showTyping)
-                    .toggleStyle(.checkbox)
-                    .font(Theme.bodyFont)
-
                 if spec.allowKeychainSave {
                     Toggle("Save in Keychain", isOn: $model.saveToKeychain)
-                        .toggleStyle(.checkbox)
-                        .font(Theme.bodyFont)
                         .disabled(degraded)
                 }
             }
+            .toggleStyle(.checkbox)
+            .font(Theme.bodyFont)
+
             if spec.allowKeychainSave && degraded {
-                Text(verbatim: "Save unavailable — running with degraded keychain posture (ad-hoc signature).")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Theme.errorText)
-                    .fixedSize(horizontal: false, vertical: true)
+                StatusLine(
+                    tone: .info,
+                    text: "Can't save to Keychain: this build is signed ad hoc."
+                )
             }
-        }
-        .padding(.leading, Theme.fieldLabelColumnWidth + Theme.smallPadding)
-    }
-
-    /// Bottom: Cancel / [NotOK] / OK, right-aligned. OK is the only
-    /// saturated control in the dialog and is disabled until canSubmit.
-    @ViewBuilder
-    private var buttonRow: some View {
-        HStack(spacing: Theme.smallPadding) {
-            Spacer()
-            Button(spec.resolvedCancel) {
-                model.cancel()
-            }
-            .keyboardShortcut(.cancelAction)
-            .controlSize(.regular)
-
-            if let notOK = spec.notOKLabel, !notOK.isEmpty {
-                Button(notOK) {
-                    // NotOK on a GETPIN is unusual but the protocol
-                    // permits it. Treated as a non-confirmation result.
-                    model.cancel()
-                }
-                .controlSize(.regular)
-            }
-
-            Button {
-                handleSubmit()
-            } label: {
-                if model.isSubmitting {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.small)
-                            .progressViewStyle(.circular)
-                        Text(verbatim: spec.resolvedOK)
-                    }
-                } else {
-                    Text(verbatim: spec.resolvedOK)
-                }
-            }
-            .keyboardShortcut(.defaultAction)
-            .buttonStyle(PrimaryButtonStyle())
-            .disabled(!model.canSubmit || model.isSubmitting)
-            .opacity(model.canSubmit && !model.isSubmitting ? 1.0 : 0.45)
         }
     }
 
     // MARK: - Field
 
     /// HardenedSecureField (or HardenedTextField when revealed via the
-    /// Show typing checkbox) — both AppKit-backed wrappers with every
+    /// Show typing checkbox): both AppKit-backed wrappers with every
     /// auto-substitution / spell-correction / character-picker behaviour
     /// explicitly off and the field editor's undo manager disabled.
     /// See `HardenedSecureField.swift` for the full hardening surface.
     ///
     /// We intercept binding writes via a wrapper Binding so the model's
-    /// `setPin(from:)` fires *synchronously* on every keystroke. The
-    /// previous implementation observed `.onChange(of: binding.wrappedValue)`
-    /// on the enclosing Group, which on macOS Sequoia debounced or
-    /// dropped SecureField writes — the symptom was OK staying disabled
-    /// until the user toggled Show typing (which re-rendered the field
-    /// hierarchy and back-filled the model on rebuild). Wrapping the
-    /// binding makes the side-effect deterministic, regardless of which
-    /// field type is currently mounted or how SwiftUI batches updates.
+    /// `setPin(from:)` fires *synchronously* on every keystroke. Observing
+    /// `.onChange(of: binding.wrappedValue)` instead debounced or dropped
+    /// SecureField writes on macOS Sequoia (OK stayed disabled until Show
+    /// typing was toggled).
     ///
-    /// Focus: the pin row auto-focuses on first appear and on any
-    /// Show typing rebuild. The repeat row never auto-focuses; the
-    /// user tabs / clicks into it. AppKit's automatic nextKeyView
-    /// chain handles tab navigation between fields.
+    /// Accessibility: the label is the prompt; no accessibility *value* is ever
+    /// set, so the secure field's own masked value is all VoiceOver can read.
+    ///
+    /// Focus: the pin row auto-focuses on first appear and on any Show typing
+    /// rebuild. The repeat row never auto-focuses; the user tabs / clicks into
+    /// it. AppKit's automatic nextKeyView chain handles tab navigation.
     @ViewBuilder
     private func pinField(
         binding: Binding<String>,
         onChange: @escaping (String) -> Void,
         accessibilityLabel: String,
+        accessibilityHint: String?,
         isPinRow: Bool
     ) -> some View {
         let intercepted = Binding<String>(
@@ -428,14 +323,18 @@ public struct PinView: View {
                 becomesFirstResponderOnAppear: isPinRow,
                 onSubmit: { handleSubmit() }
             )
+            .frame(maxWidth: .infinity)
             .accessibilityLabel(Text(verbatim: accessibilityLabel))
+            .accessibilityHint(Text(verbatim: accessibilityHint ?? ""))
         } else {
             HardenedSecureField(
                 text: intercepted,
                 becomesFirstResponderOnAppear: isPinRow,
                 onSubmit: { handleSubmit() }
             )
+            .frame(maxWidth: .infinity)
             .accessibilityLabel(Text(verbatim: accessibilityLabel))
+            .accessibilityHint(Text(verbatim: accessibilityHint ?? ""))
         }
     }
 
@@ -445,11 +344,59 @@ public struct PinView: View {
     /// clear the system pasteboard here so any paste-fill leaves no
     /// residue before the model resolves.
     private func handleSubmit() {
-        guard model.canSubmit, !model.isSubmitting else { return }
+        guard !model.isSubmitting else { return }
+        guard model.canSubmit else {
+            submitAttempted = true
+            return
+        }
         PasteboardGuard.clearIfAdvanced(
             since: pasteboardBaseline,
             enabled: clearPasteboardOnSubmit
         )
         model.submit()
+    }
+}
+
+// MARK: - Field status
+
+/// What the status line under the fields says. A pure function of the
+/// model's lengths and flags, so the rules are testable without a view.
+enum FieldStatus: Equatable {
+    case hidden, mismatch, match, tooLong
+
+    /// - A repeat that is still shorter than the passphrase may yet match, so
+    ///   it stays quiet while the user types; an eager error on the first
+    ///   keystroke would be wrong and, to VoiceOver, noisy.
+    /// - Once the repeat is as long as the passphrase, or the user pressed
+    ///   Return, a difference is a mismatch.
+    static func evaluate(
+        pinLength: Int,
+        repeatLength: Int,
+        pinsMatch: Bool,
+        truncated: Bool,
+        submitAttempted: Bool
+    ) -> FieldStatus {
+        if truncated { return .tooLong }
+        guard repeatLength > 0 else { return .hidden }
+        if pinsMatch { return .match }
+        return repeatLength >= pinLength || submitAttempted ? .mismatch : .hidden
+    }
+
+    /// Text for the status line. gpg-agent's SETREPEATERROR / SETREPEATOK win
+    /// over the built-in wording; a match without SETREPEATOK says nothing.
+    func message(for spec: DialogSpec) -> String? {
+        switch self {
+        case .hidden: nil
+        case .mismatch: spec.repeatError.nonEmpty ?? "Passphrases do not match."
+        case .match: spec.repeatOK.nonEmpty
+        case .tooLong: "Passphrase is too long."
+        }
+    }
+
+    var tone: StatusLine.Tone {
+        switch self {
+        case .match: .success
+        case .hidden, .mismatch, .tooLong: .error
+        }
     }
 }

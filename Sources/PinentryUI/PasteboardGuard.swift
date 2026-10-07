@@ -20,7 +20,7 @@
 //   - we do NOT clear on cancel — the user may have copied something
 //     unrelated and we'd surprise them.
 
-import AppKit
+public import AppKit
 import os
 
 @MainActor
@@ -43,15 +43,17 @@ public enum PasteboardGuard {
     }
 
     /// Clear `pasteboard` iff `enabled` is true AND the change count has
-    /// advanced past `baseline`. Returns true when a clear was emitted.
-    /// Idempotent / safe to call multiple times.
+    /// advanced past `baseline`. A negative `baseline` means "no snapshot was
+    /// taken" and never clears, so a missing baseline cannot wipe a clipboard
+    /// the user filled before the dialog. Returns true when a clear was
+    /// emitted. Idempotent / safe to call multiple times.
     @discardableResult
     public static func clearIfAdvanced(
         since baseline: Int,
         enabled: Bool,
         on pasteboard: NSPasteboard = .general
     ) -> Bool {
-        guard enabled else { return false }
+        guard enabled, baseline >= 0 else { return false }
         let current = pasteboard.changeCount
         guard current > baseline else { return false }
         pasteboard.clearContents()

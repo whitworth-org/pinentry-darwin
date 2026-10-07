@@ -4,7 +4,7 @@
 // main.swift — top-level entry point for the pinentry-darwin binary.
 //
 // Responsibilities:
-//   1. Parse argv into a RuntimeMode (daemon / preferences / version / help).
+//   1. Parse argv into a RuntimeMode (daemon / preferences / configure / version / help).
 //   2. Install signal handlers so SIGTERM/SIGHUP/SIGINT exit cleanly and
 //      SIGPIPE doesn't crash us when gpg-agent closes its end of the pipe.
 //   3. Bootstrap the appropriate mode:
@@ -88,7 +88,7 @@ private func bootstrap() -> Never {
     // the operator wondering why /cores/ contains a passphrase after a
     // crash.
     var noCore = rlimit(rlim_cur: 0, rlim_max: 0)
-    if setrlimit(RLIMIT_CORE, &noCore) != 0 {
+    if unsafe setrlimit(RLIMIT_CORE, &noCore) != 0 {
         let e = errno
         bootLog.error("setrlimit(RLIMIT_CORE, 0) failed (errno=\(e, privacy: .public)); core dump may capture secrets")
     }
@@ -106,13 +106,13 @@ private func bootstrap() -> Never {
     // LOWER an operator-hardened parent limit, defeating M5 in exactly
     // the case where the operator did the right thing.
     var memlim = rlimit(rlim_cur: 0, rlim_max: 0)
-    if getrlimit(RLIMIT_MEMLOCK, &memlim) == 0 {
+    if unsafe getrlimit(RLIMIT_MEMLOCK, &memlim) == 0 {
         let target = rlim_t(1 << 20)
         let raised = min(memlim.rlim_max, target)
         let proposed = Swift.max(memlim.rlim_cur, raised)
         if proposed > memlim.rlim_cur {
             memlim.rlim_cur = proposed
-            if setrlimit(RLIMIT_MEMLOCK, &memlim) != 0 {
+            if unsafe setrlimit(RLIMIT_MEMLOCK, &memlim) != 0 {
                 let e = errno
                 bootLog.error("setrlimit(RLIMIT_MEMLOCK, \(proposed, privacy: .public)) failed (errno=\(e, privacy: .public)); secrets may page to swap")
             }
@@ -134,6 +134,9 @@ private func bootstrap() -> Never {
     case .help:
         writeStdout(helpText())
         exit(0)
+
+    case .configureGPGAgent:
+        exit(GpgAgentConfig.run())
 
     case .preferences:
         PreferencesMode.run()

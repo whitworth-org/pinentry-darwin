@@ -2,14 +2,13 @@
 // Copyright 2026 Ryan Whitworth.
 //
 // AboutView.swift — Settings → About tab.
-//
-// The build hash is shown as "dev" until a generated source file with a
-// `BUILD_HASH` constant is added at build time. Doing this without a
-// build script is out of scope for this module.
 
-import SwiftUI
+import AppKit
+public import SwiftUI
 
 public struct AboutView: View {
+
+    private static let projectURL = URL(string: "https://github.com/whitworth-org/pinentry-darwin")!
 
     public init() {}
 
@@ -21,63 +20,38 @@ public struct AboutView: View {
         Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0"
     }
 
-    private var buildHash: String { "dev" }
-
     public var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: Theme.mediumPadding) {
-                HStack(spacing: Theme.mediumPadding) {
-                    // Asset is referenced by name; bundle may not yet ship one.
-                    // SwiftUI silently renders an empty image if missing.
-                    Image("AppIcon")
-                        .resizable()
-                        .aspectRatio(contentMode: .fit)
-                        .frame(width: 64, height: 64)
+        VStack(spacing: Theme.mediumPadding) {
+            Spacer(minLength: 0)
+            Image(nsImage: NSApplication.shared.applicationIconImage)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 96, height: 96)
+                .accessibilityHidden(true)
 
-                    VStack(alignment: .leading, spacing: Theme.smallPadding / 2) {
-                        Text("pinentry-darwin")
-                            .font(Theme.titleFont)
-                            .fontWeight(.bold)
-                            .foregroundStyle(Color.primary)
-                        Text("Version \(version) (\(build))")
-                            .font(Theme.bodyFont)
-                            .foregroundStyle(Color.secondary)
-                        Text("Build \(buildHash)")
-                            .font(Theme.monospacedFont)
-                            .foregroundStyle(Color.secondary)
-                    }
-                }
-
-                Divider()
-
-                Text("MIT licensed")
-                    .font(Theme.bodyFont)
-                    .foregroundStyle(Color.primary)
-
-                Link(
-                    "github.com/whitworth/pinentry-darwin",
-                    destination: URL(string: "https://github.com/whitworth/pinentry-darwin")!
-                )
-                .font(Theme.bodyFont)
-
-                Divider()
-
-                VStack(alignment: .leading, spacing: Theme.smallPadding) {
-                    Text("Attributions")
-                        .font(Theme.bodyFont)
-                        .fontWeight(.semibold)
-                        .foregroundStyle(Color.primary)
-                    Text("Window styling derived from Ghostty (MIT).")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Color.secondary)
-                    Text("Assuan protocol surface compatible with GnuPG pinentry.")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Color.secondary)
-                }
+            VStack(spacing: Theme.smallPadding / 2) {
+                Text("pinentry-darwin")
+                    .font(.title.weight(.semibold))
+                Text("Version \(version) (\(build))")
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
-            .padding(Theme.mediumPadding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
+            .accessibilityElement(children: .combine)
+
+            Link("github.com/whitworth-org/pinentry-darwin", destination: Self.projectURL)
+                .accessibilityLabel("Project page on GitHub")
+
+            VStack(spacing: Theme.smallPadding / 2) {
+                Text("Window styling derived from Ghostty (MIT).")
+                Text("Compatible with the GnuPG pinentry Assuan protocol.")
+                Text("MIT licensed. Copyright © 2026 Ryan Whitworth.")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            Spacer(minLength: 0)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(Theme.blockPadding)
     }
 }

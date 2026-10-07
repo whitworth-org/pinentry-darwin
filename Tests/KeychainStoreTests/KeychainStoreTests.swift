@@ -66,12 +66,12 @@ final class KeychainStoreTests: XCTestCase {
     /// test inputs — production passphrases enter as bytes from the Assuan
     /// parser.
     private func secureBytes(_ bytes: [UInt8]) -> SecureBytes {
-        bytes.withUnsafeBufferPointer { SecureBytes(copying: $0) }
+        SecureBytes(bytes)
     }
 
     /// Read a SecureBytes back into a [UInt8] for assertions. Test-only.
     private func read(_ bytes: SecureBytes) -> [UInt8] {
-        bytes.withUnsafeBytes { buf in Array(buf) }
+        bytes.withSpan { span in (0..<span.count).map { span[$0] } }
     }
 
     // MARK: - Round trip

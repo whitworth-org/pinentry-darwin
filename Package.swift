@@ -1,4 +1,4 @@
-// swift-tools-version: 6.0
+// swift-tools-version: 6.2
 //
 // pinentry-darwin
 //
@@ -10,17 +10,27 @@
 // HARD RULES (per project CLAUDE.md):
 //   - No third-party dependencies. Standard library + Apple frameworks only.
 //   - Swift 6 language mode, strict concurrency.
-//   - SwiftPM compile floor: macOS 15.0+ (matches the toolchain shipped on
-//     GitHub's `macos-26` runner). The Secure-Enclave-backed SSH module is
-//     gated at runtime via `if #available(macOS 26.0, *)`, and the .app's
-//     `LSMinimumSystemVersion` enforces 26.0 at launch.
+//   - macOS 26.0 floor, matching the .app's `LSMinimumSystemVersion`.
 
 import PackageDescription
+
+// Swift 7 language-mode behaviours, adopted early so the code is already
+// correct when the mode becomes the default, plus strict memory safety
+// (SE-0458) so every unsafe construct is explicit. Applied to every target.
+let strictSettings: [SwiftSetting] = [
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+    .enableUpcomingFeature("InferIsolatedConformances"),
+    .enableUpcomingFeature("ImmutableWeakCaptures"),
+    .enableUpcomingFeature("ExistentialAny"),
+    .enableUpcomingFeature("InternalImportsByDefault"),
+    .enableUpcomingFeature("MemberImportVisibility"),
+    .strictMemorySafety(),
+]
 
 let package = Package(
     name: "pinentry-darwin",
     platforms: [
-        .macOS(.v15)
+        .macOS(.v26)
     ],
     products: [
         .executable(name: "pinentry-darwin", targets: ["PinentryDarwin"]),
@@ -34,22 +44,26 @@ let package = Package(
     targets: [
         .target(
             name: "SecureMemory",
-            path: "Sources/SecureMemory"
+            path: "Sources/SecureMemory",
+            swiftSettings: strictSettings
         ),
         .target(
             name: "AssuanProtocol",
             dependencies: ["SecureMemory"],
-            path: "Sources/AssuanProtocol"
+            path: "Sources/AssuanProtocol",
+            swiftSettings: strictSettings
         ),
         .target(
             name: "KeychainStore",
             dependencies: ["SecureMemory"],
-            path: "Sources/KeychainStore"
+            path: "Sources/KeychainStore",
+            swiftSettings: strictSettings
         ),
         .target(
             name: "SSHIdentity",
             dependencies: [],
-            path: "Sources/SSHIdentity"
+            path: "Sources/SSHIdentity",
+            swiftSettings: strictSettings
         ),
         .target(
             name: "PinentryUI",
@@ -59,7 +73,8 @@ let package = Package(
                 "KeychainStore",
                 "SSHIdentity",
             ],
-            path: "Sources/PinentryUI"
+            path: "Sources/PinentryUI",
+            swiftSettings: strictSettings
         ),
         .executableTarget(
             name: "PinentryDarwin",
@@ -69,47 +84,62 @@ let package = Package(
                 "KeychainStore",
                 "PinentryUI",
             ],
-            path: "Sources/PinentryDarwin"
+            path: "Sources/PinentryDarwin",
+            swiftSettings: strictSettings
         ),
         .executableTarget(
             name: "audit-bundle",
             dependencies: [],
-            path: "Tools/AuditBundle"
+            path: "Tools/AuditBundle",
+            swiftSettings: strictSettings
         ),
         .testTarget(
             name: "SecureMemoryTests",
             dependencies: ["SecureMemory"],
-            path: "Tests/SecureMemoryTests"
+            path: "Tests/SecureMemoryTests",
+            swiftSettings: strictSettings
         ),
         .testTarget(
             name: "AssuanProtocolTests",
             dependencies: ["AssuanProtocol", "SecureMemory"],
-            path: "Tests/AssuanProtocolTests"
+            path: "Tests/AssuanProtocolTests",
+            swiftSettings: strictSettings
         ),
         .testTarget(
             name: "KeychainStoreTests",
             dependencies: ["KeychainStore", "SecureMemory"],
-            path: "Tests/KeychainStoreTests"
+            path: "Tests/KeychainStoreTests",
+            swiftSettings: strictSettings
         ),
         .testTarget(
             name: "SSHIdentityTests",
             dependencies: ["SSHIdentity"],
-            path: "Tests/SSHIdentityTests"
+            path: "Tests/SSHIdentityTests",
+            swiftSettings: strictSettings
         ),
         .testTarget(
             name: "PinentryUITests",
-            dependencies: ["PinentryUI", "SecureMemory"],
-            path: "Tests/PinentryUITests"
+            dependencies: ["PinentryUI", "KeychainStore", "SecureMemory"],
+            path: "Tests/PinentryUITests",
+            swiftSettings: strictSettings
+        ),
+        .testTarget(
+            name: "PinentryDarwinTests",
+            dependencies: ["PinentryDarwin"],
+            path: "Tests/PinentryDarwinTests",
+            swiftSettings: strictSettings
         ),
         .testTarget(
             name: "IntegrationSmokeTests",
             dependencies: [],
-            path: "Tests/IntegrationSmokeTests"
+            path: "Tests/IntegrationSmokeTests",
+            swiftSettings: strictSettings
         ),
         .testTarget(
             name: "AuditBundleTests",
             dependencies: [],
-            path: "Tests/AuditBundleTests"
+            path: "Tests/AuditBundleTests",
+            swiftSettings: strictSettings
         ),
     ],
     swiftLanguageModes: [.v6]

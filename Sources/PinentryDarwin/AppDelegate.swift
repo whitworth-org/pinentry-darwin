@@ -28,21 +28,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let session = Session(input: stdin, output: stdout)
 
-        // Daemon mode reads UI settings (theme, etc.) so the modal pinentry
-        // dialog matches the user's choice. The Coordinator currently takes
-        // its UISettings at construction time and does not expose a setter,
-        // so we have to load synchronously before constructing it. The Task
-        // below loads via the actor, then builds the coordinator+loop and
-        // starts the protocol loop.
+        // The coordinator reads UI settings (theme, etc.) from the store each
+        // time it presents a dialog, so Settings changes apply to the next
+        // dialog without restarting this process.
         let prefs = UserPrefs()
         let keychain = KeychainStore()
 
         Task { @MainActor in
-            let uiSettings = await UISettingsStore().load()
-            let coordinator = PinentryCoordinator(
-                userPrefs: prefs,
-                uiSettings: uiSettings
-            )
+            let coordinator = PinentryCoordinator(userPrefs: prefs)
             let loop = AssuanLoop(session: session,
                                   coordinator: coordinator,
                                   keychain: keychain,

@@ -12,8 +12,8 @@
 // control (the OK button via .borderedProminent). Everything else is
 // grayscale carried by NSVisualEffectView material.
 
-import AppKit
-import SwiftUI
+public import AppKit
+public import SwiftUI
 
 public enum Theme {
 
@@ -41,9 +41,9 @@ public enum Theme {
     // departing from the platform vocabulary.
 
     /// Display heading (SETTITLE / per-dialog header). Uses SF Pro
-    /// Rounded at a generous size — readable at arm's length on 5K
-    /// while staying tight on a 13" laptop.
-    public static let titleFont: Font = .system(size: 22, weight: .semibold, design: .rounded)
+    /// Rounded at the system `.title` size (22pt on macOS), so it scales
+    /// with the Text Size accessibility setting like the body text does.
+    public static let titleFont: Font = .system(.title, design: .rounded, weight: .semibold)
 
     /// Body text (SETDESC / form labels / button text).
     public static let bodyFont: Font = .system(.body)
@@ -77,14 +77,6 @@ public enum Theme {
     /// Inline accessory icons (eye toggle, info adornments).
     public static let inlineIconSize: CGFloat = 14
 
-    // MARK: - Layout columns
-
-    /// Fixed width of the prompt-label column in the GETPIN input row.
-    /// Holds "Passphrase:" / "Repeat:" / localised equivalents on a
-    /// single line at our body font; right-aligned so the field lines up
-    /// across rows.
-    public static let fieldLabelColumnWidth: CGFloat = 84
-
     // MARK: - Motion
     //
     // One restrained entrance animation, period. No decorative motion
@@ -95,36 +87,47 @@ public enum Theme {
     /// macOS Sequoia.
     public static let entranceDuration: Double = 0.22
 
-    /// Vertical translation (in points) the dialog content slides up
-    /// from on first appear. Subtle enough to read as polish, not a
-    /// visible stage transition.
-    public static let entranceTranslate: CGFloat = 8
-
     // MARK: - Colours (system, never hex)
 
-    /// Window-style background — pairs with the NSVisualEffectView underneath.
+    /// Window-style background. Opaque, so Reduce Transparency has nothing
+    /// to change; the window paints exactly this colour.
     public static var windowBackground: Color {
         Color(NSColor.windowBackgroundColor)
     }
 
-    /// Accent colour — used sparingly for the borderedProminent OK button
-    /// and the quality-bar success band. Tracks System Settings →
-    /// Appearance → Accent colour live.
+    /// Accent colour — used sparingly for header icons and as the fill of
+    /// `PrimaryButtonStyle`. Tracks System Settings → Appearance → Accent
+    /// colour live. Decorative use only: it is not guaranteed to reach text
+    /// contrast against the window, so never set text in it.
     public static var accent: Color {
         Color(NSColor.controlAccentColor)
     }
 
-    /// Error-text colour. Maps to the system semantic red.
+    /// Error-text colour. The system red in Dark mode; darkened in Light
+    /// mode, where the plain system red is only about 3:1 against the
+    /// window. Reaches 4.5:1 in Light and Dark, normal and Increase Contrast.
     public static var errorText: Color {
-        Color(NSColor.systemRed)
+        Color(nsColor: NSColor(name: nil) { appearance in errorTextColor(for: appearance) })
     }
 
-    /// Warning colour for low-but-positive quality scores.
+    static func errorTextColor(for appearance: NSAppearance) -> NSColor {
+        var color = NSColor.systemRed
+        appearance.performAsCurrentDrawingAppearance {
+            if appearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua {
+                color = NSColor.systemRed.blended(withFraction: 0.3, of: .black) ?? .systemRed
+            }
+        }
+        return color
+    }
+
+    /// Warning colour for low-but-positive quality scores. A graphic
+    /// colour (bars, glyphs), not for text.
     public static var warning: Color {
         Color(NSColor.systemYellow)
     }
 
-    /// Success colour for high-quality passphrases.
+    /// Success colour for high-quality passphrases. A graphic colour
+    /// (bars, glyphs), not for text.
     public static var success: Color {
         Color(NSColor.systemGreen)
     }
@@ -135,36 +138,141 @@ public enum Theme {
     public static var hairline: Color {
         Color.secondary.opacity(0.18)
     }
+
+    // MARK: - Contrast
+    //
+    // WCAG 2.x relative luminance and contrast ratio on sRGB colours. Used
+    // to pick a label colour for the accent-filled button, because the
+    // user-selectable accent ranges from yellow to graphite and no single
+    // label colour reads on all of them.
+
+    /// The `NSAppearance` SwiftUI's colour scheme and contrast map to.
+    static func appearance(scheme: ColorScheme, contrast: ColorSchemeContrast) -> NSAppearance {
+        let name: NSAppearance.Name
+        switch (scheme, contrast) {
+        case (.dark, .increased): name = .accessibilityHighContrastDarkAqua
+        case (.dark, _): name = .darkAqua
+        case (_, .increased): name = .accessibilityHighContrastAqua
+        default: name = .aqua
+        }
+        return NSAppearance(named: name) ?? .currentDrawing()
+    }
+
+    /// `color` as it renders under the given scheme and contrast, in sRGB.
+    static func resolve(
+        _ color: NSColor,
+        scheme: ColorScheme,
+        contrast: ColorSchemeContrast
+    ) -> NSColor {
+        var resolved = color
+        appearance(scheme: scheme, contrast: contrast).performAsCurrentDrawingAppearance {
+            resolved = color.usingColorSpace(.sRGB) ?? color
+        }
+        return resolved
+    }
+
+    /// WCAG relative luminance of a colour (alpha ignored). Colours outside
+    /// sRGB, such as `NSColor.white`, are converted first.
+    static func relativeLuminance(_ input: NSColor) -> Double {
+        let color = input.usingColorSpace(.sRGB) ?? input
+        func linear(_ channel: CGFloat) -> Double {
+            let value = Double(channel)
+            return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linear(color.redComponent)
+            + 0.7152 * linear(color.greenComponent)
+            + 0.0722 * linear(color.blueComponent)
+    }
+
+    /// WCAG contrast ratio between two sRGB colours, 1...21.
+    static func contrastRatio(_ first: NSColor, _ second: NSColor) -> Double {
+        let lighter = max(relativeLuminance(first), relativeLuminance(second))
+        let darker = min(relativeLuminance(first), relativeLuminance(second))
+        return (lighter + 0.05) / (darker + 0.05)
+    }
+
+    /// Label colour for text on `fill`. White is the platform convention and
+    /// is kept while it reaches 3:1 (the WCAG UI-component threshold), which
+    /// holds for the blue, purple, pink and red accents. With Increase Contrast
+    /// the bar is 4.5:1 (AA text). Below the bar the label is black, which
+    /// always passes because the two ratios multiply to 21.
+    static func prominentLabel(on fill: NSColor, increasedContrast: Bool) -> NSColor {
+        let required = increasedContrast ? 4.5 : 3.0
+        return contrastRatio(.white, fill) >= required ? .white : .black
+    }
+}
+
+// MARK: - Appearance override
+
+extension UISettings.Theme {
+
+    /// The window/app appearance for this choice. `nil` for System: nothing
+    /// is overridden, so the window tracks System Settings live.
+    public var appearance: NSAppearance? {
+        switch self {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
 }
 
 // MARK: - Primary button style
 //
-// `.borderedProminent` renders a slightly desaturated accent in Dark
-// mode for visual hierarchy reasons. We want the dialog's primary
-// action to match the SF Symbol header icon's pure accent — when the
-// passphrase field has content and OK becomes enabled, the colour
-// should read as "this is THE action to take".
+// Solid-fills with the system accent colour, so the dialog's primary action
+// matches the SF Symbol header icon and tracks System Settings live. The
+// label colour is chosen per fill (see `Theme.prominentLabel`), because
+// white text fails contrast on yellow, orange, green and light graphite.
 //
-// PrimaryButtonStyle solid-fills with `Theme.accent` (the same colour
-// as `controlAccentColor` driving the icon), uses `.white` text for
-// guaranteed contrast on any accent hue the user may have picked, and
-// dims subtly while held. Shape and padding mirror the standard macOS
-// button so it sits next to the system-styled Cancel button without
-// looking out of place.
+// `.glassProminent` was evaluated and not adopted: glass is a navigation-
+// layer material, adds no information to a modal passphrase prompt, and
+// cannot be verified headlessly. Disabled buttons drop the accent for a
+// neutral fill. Increase Contrast adds an outline and pressed state
+// darkens instead of fading, so label contrast never drops.
 
 public struct PrimaryButtonStyle: ButtonStyle {
-    public init() {}
+    private let accent: NSColor
+
+    public init() {
+        self.accent = .controlAccentColor
+    }
+
+    /// Test seam: lets tests render every accent the user can pick.
+    init(accent: NSColor) {
+        self.accent = accent
+    }
 
     public func makeBody(configuration: Configuration) -> some View {
+        PrimaryButtonBody(configuration: configuration, accent: accent)
+    }
+}
+
+private struct PrimaryButtonBody: View {
+    let configuration: ButtonStyleConfiguration
+    let accent: NSColor
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.colorSchemeContrast) private var contrast
+    @Environment(\.isEnabled) private var isEnabled
+
+    private static let shape = RoundedRectangle(cornerRadius: 8, style: .continuous)
+    private let disabledFill = Color.secondary.opacity(0.2)
+
+    var body: some View {
+        let fill = Theme.resolve(accent, scheme: scheme, contrast: contrast)
+        let label = Color(
+            nsColor: Theme.prominentLabel(on: fill, increasedContrast: contrast == .increased))
         configuration.label
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(.white)
+            .font(Theme.bodyFont.weight(.medium))
+            .foregroundStyle(isEnabled ? label : Color.secondary)
             .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Theme.accent.opacity(configuration.isPressed ? 0.78 : 1.0))
-            )
-            .contentShape(Rectangle())
+            .padding(.vertical, 4)
+            .background(Self.shape.fill(isEnabled ? Color(nsColor: fill) : disabledFill))
+            .overlay(Self.shape.fill(Color.black.opacity(configuration.isPressed ? 0.18 : 0)))
+            .overlay {
+                if contrast == .increased {
+                    Self.shape.strokeBorder(Color.primary, lineWidth: 1)
+                }
+            }
+            .contentShape(Self.shape)
     }
 }

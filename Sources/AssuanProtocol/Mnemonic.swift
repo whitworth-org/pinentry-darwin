@@ -14,8 +14,6 @@
 //   __   → _     two underscores escape one literal underscore
 //   foo_ → foo   trailing dangling underscore is dropped (malformed)
 
-import Foundation
-
 public enum Mnemonic {
 
     /// Unicode codepoints whose visual effect can re-order or hide

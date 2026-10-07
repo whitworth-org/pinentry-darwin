@@ -3,11 +3,17 @@
 //
 // SecureBytesTests — unit tests for the mlock'd, deinit-zeroed buffer.
 
-import XCTest
 import Darwin
+import Foundation
+import XCTest
 @testable import SecureMemory
 
 final class SecureBytesTests: XCTestCase {
+
+    /// Copy of the valid prefix, read through the safe `Span` accessor.
+    private func contents(of buf: SecureBytes) -> [UInt8] {
+        buf.withSpan { span in (0..<span.count).map { span[$0] } }
+    }
 
     // MARK: - Allocation / basic state
 
@@ -56,49 +62,34 @@ final class SecureBytesTests: XCTestCase {
             buf.append(b)
         }
         XCTAssertEqual(buf.count, payload.count)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(view.count, payload.count)
-            XCTAssertEqual(Array(view), payload)
-        }
+        XCTAssertEqual(contents(of: buf), payload)
     }
 
     func testAppendBuffer() {
         let buf = SecureBytes(capacity: 16)
         let payload: [UInt8] = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
-        payload.withUnsafeBufferPointer { src in
-            buf.append(contentsOf: src)
-        }
+        buf.append(contentsOf: payload.span)
         XCTAssertEqual(buf.count, payload.count)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(Array(view), payload)
-        }
+        XCTAssertEqual(contents(of: buf), payload)
     }
 
     func testAppendEmptyBufferIsNoOp() {
         let buf = SecureBytes(capacity: 4)
         buf.append(0xAA)
         let empty: [UInt8] = []
-        empty.withUnsafeBufferPointer { src in
-            buf.append(contentsOf: src)
-        }
+        buf.append(contentsOf: empty.span)
         XCTAssertEqual(buf.count, 1)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(Array(view), [0xAA])
-        }
+        XCTAssertEqual(contents(of: buf), [0xAA])
     }
 
     // MARK: - init(copying:) / init([UInt8])
 
     func testInitCopyingBuffer() {
         let payload: [UInt8] = [0x10, 0x20, 0x30, 0x40, 0x50]
-        let buf = payload.withUnsafeBufferPointer { src in
-            SecureBytes(copying: src)
-        }
+        let buf = SecureBytes(copying: payload.span)
         XCTAssertEqual(buf.count, payload.count)
         XCTAssertEqual(buf.capacity, payload.count)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(Array(view), payload)
-        }
+        XCTAssertEqual(contents(of: buf), payload)
     }
 
     func testInitFromArray() {
@@ -106,9 +97,7 @@ final class SecureBytesTests: XCTestCase {
         let buf = SecureBytes(payload)
         XCTAssertEqual(buf.count, payload.count)
         XCTAssertEqual(buf.capacity, payload.count)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(Array(view), payload)
-        }
+        XCTAssertEqual(contents(of: buf), payload)
     }
 
     // MARK: - reset
@@ -117,9 +106,7 @@ final class SecureBytesTests: XCTestCase {
         let buf = SecureBytes(capacity: 32)
         // Write a recognisable sentinel pattern.
         let sentinel: [UInt8] = Array(repeating: 0xA5, count: 16)
-        sentinel.withUnsafeBufferPointer { src in
-            buf.append(contentsOf: src)
-        }
+        buf.append(contentsOf: sentinel.span)
         XCTAssertEqual(buf.count, 16)
 
         buf.reset()
@@ -129,11 +116,28 @@ final class SecureBytesTests: XCTestCase {
         // After reset the underlying bytes 0..<16 must read as zero. Use
         // the mutable accessor to peek (non-mutating peek through the
         // capacity-sized window).
-        buf.withUnsafeMutableBytes { full in
+        unsafe buf.withUnsafeMutableBytes { full in
             for i in 0..<16 {
-                XCTAssertEqual(full[i], 0,
+                XCTAssertEqual(unsafe full[i], 0,
                                "byte \(i) should be zeroed after reset")
             }
+        }
+    }
+
+    /// `withUnsafeMutableBytes` can write past `count`; `reset()` must wipe
+    /// those bytes too, not just `0..<count`.
+    func testResetZeroesBytesWrittenPastCount() {
+        let buf = SecureBytes(capacity: 32)
+        buf.append(0x01)
+        unsafe buf.withUnsafeMutableBytes { full in
+            for i in 0..<full.count { unsafe full[i] = 0xA5 }
+        }
+
+        buf.reset()
+
+        unsafe buf.withUnsafeMutableBytes { full in
+            XCTAssertEqual(unsafe Array(full), Array(repeating: 0, count: 32),
+                           "reset() must wipe the whole capacity")
         }
     }
 
@@ -151,9 +155,7 @@ final class SecureBytesTests: XCTestCase {
         buf.reset()
         buf.append(0x33)
         XCTAssertEqual(buf.count, 1)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(Array(view), [0x33])
-        }
+        XCTAssertEqual(contents(of: buf), [0x33])
     }
 
     // MARK: - withUnsafeMutableBytes
@@ -161,13 +163,13 @@ final class SecureBytesTests: XCTestCase {
     func testWithUnsafeMutableBytesExposesFullCapacity() {
         let buf = SecureBytes(capacity: 10)
         buf.append(0x01)
-        buf.withUnsafeMutableBytes { full in
+        unsafe buf.withUnsafeMutableBytes { full in
             XCTAssertEqual(full.count, 10)
             // Existing prefix preserved.
-            XCTAssertEqual(full[0], 0x01)
+            XCTAssertEqual(unsafe full[0], 0x01)
             // Tail is kernel-zeroed.
             for i in 1..<10 {
-                XCTAssertEqual(full[i], 0)
+                XCTAssertEqual(unsafe full[i], 0)
             }
         }
     }
@@ -188,22 +190,16 @@ final class SecureBytesTests: XCTestCase {
             buf.append(0xFF)
         }
         XCTAssertEqual(buf.count, 4)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(Array(view), [0xFF, 0xFF, 0xFF, 0xFF])
-        }
+        XCTAssertEqual(contents(of: buf), [0xFF, 0xFF, 0xFF, 0xFF])
     }
 
     func testAppendBufferExactlyToCapacitySucceeds() {
         let buf = SecureBytes(capacity: 8)
         let half: [UInt8] = [1, 2, 3, 4]
-        half.withUnsafeBufferPointer { src in
-            buf.append(contentsOf: src)
-            buf.append(contentsOf: src)
-        }
+        buf.append(contentsOf: half.span)
+        buf.append(contentsOf: half.span)
         XCTAssertEqual(buf.count, 8)
-        buf.withUnsafeBytes { view in
-            XCTAssertEqual(Array(view), [1, 2, 3, 4, 1, 2, 3, 4])
-        }
+        XCTAssertEqual(contents(of: buf), [1, 2, 3, 4, 1, 2, 3, 4])
     }
 
     // MARK: - mlock failure tolerance
@@ -223,48 +219,37 @@ final class SecureBytesTests: XCTestCase {
 
     #if DEBUG
     func testDeinitZeroesBeforeFree() {
-        // Reset the side-channel.
-        SecureBytes.lastDeinitWasZeroed = false
+        SecureBytes.lastDeinit = SecureBytes.DeinitProbe()
 
         // Scope the buffer so its `deinit` runs at end of block.
         do {
             let buf = SecureBytes(capacity: 64)
             // Fill with a non-zero sentinel so the wipe is observable.
-            buf.withUnsafeMutableBytes { full in
-                for i in 0..<full.count {
-                    full[i] = 0x5A
-                }
-            }
-            buf.append(0x01)  // bump count so something is "valid"
+            for _ in 0..<64 { buf.append(0x5A) }
             _ = buf.debugDescription()
         }
 
-        XCTAssertTrue(SecureBytes.lastDeinitWasZeroed,
+        XCTAssertTrue(SecureBytes.lastDeinit.wasZeroed,
                       "deinit must zero the mapping before unmapping")
     }
 
     /// Full page-lifecycle invariant. Under normal test conditions on macOS
     /// the kernel grants `mlock`, so `deinit` should observe in order:
-    ///   1. wipe (lastDeinitWasZeroed)
-    ///   2. wasLocked == true (lastDeinitWasLocked)
-    ///   3. munlock returns success (lastDeinitDidMunlock == .some(true))
-    ///   4. munmap returns success (lastDeinitDidMunmap)
+    ///   1. wipe (`wasZeroed`)
+    ///   2. wasLocked == true
+    ///   3. munlock returns success (`didMunlock == .some(true)`)
+    ///   4. munmap returns success (`didMunmap`)
     ///
     /// This is the autonomous half of the leaks/vmmap acceptance criterion
     /// in CLAUDE.md — the manual half (open a dialog, dismiss, run `leaks`)
     /// still needs a human, but the underlying syscall chain is verified
     /// here on every CI run.
     func testDeinitFullLifecycle() {
-        SecureBytes.lastDeinitWasZeroed = false
-        SecureBytes.lastDeinitWasLocked = false
-        SecureBytes.lastDeinitDidMunlock = nil
-        SecureBytes.lastDeinitDidMunmap = false
+        SecureBytes.lastDeinit = SecureBytes.DeinitProbe()
 
         do {
             let buf = SecureBytes(capacity: 128)
-            buf.withUnsafeMutableBytes { full in
-                for i in 0..<full.count { full[i] = 0xA5 }
-            }
+            for _ in 0..<128 { buf.append(0xA5) }
             // The instance has to be referenced after the writes so the
             // writes aren't optimised away; debugDescription is a no-op
             // touch that also asserts wasLocked at allocation time.
@@ -272,16 +257,29 @@ final class SecureBytesTests: XCTestCase {
                           "fresh allocation should be mlock'd under default RLIMIT_MEMLOCK")
         }
 
-        XCTAssertTrue(SecureBytes.lastDeinitWasZeroed,
-                      "deinit must zero the mapping")
-        XCTAssertTrue(SecureBytes.lastDeinitWasLocked,
-                      "deinit must observe wasLocked == true")
-        XCTAssertEqual(SecureBytes.lastDeinitDidMunlock, .some(true),
-                       "deinit must munlock the locked region")
-        XCTAssertTrue(SecureBytes.lastDeinitDidMunmap,
-                      "deinit must munmap the region")
+        XCTAssertEqual(
+            SecureBytes.lastDeinit,
+            SecureBytes.DeinitProbe(
+                wasZeroed: true, wasLocked: true, didMunlock: true, didMunmap: true
+            ),
+            "deinit must wipe, munlock, then munmap a locked region"
+        )
     }
     #endif
+
+    // MARK: - Concurrency
+
+    /// `append` is documented as safe under contention: the count must
+    /// never lose an increment or exceed capacity.
+    func testConcurrentAppendsNeverLoseOrOverrunCount() {
+        let appends = 4000
+        let buf = SecureBytes(capacity: SecureBytes.maxLength)
+        DispatchQueue.concurrentPerform(iterations: appends) { _ in
+            buf.append(0x7F)
+        }
+        XCTAssertEqual(buf.count, appends)
+        XCTAssertTrue(contents(of: buf).allSatisfy { $0 == 0x7F })
+    }
 
     // MARK: - debugDescription doesn't leak content
 

@@ -34,11 +34,11 @@ final class CacheTTLTests: XCTestCase {
     }
 
     private func secureBytes(_ bytes: [UInt8]) -> SecureBytes {
-        bytes.withUnsafeBufferPointer { SecureBytes(copying: $0) }
+        SecureBytes(bytes)
     }
 
     private func read(_ bytes: SecureBytes) -> [UInt8] {
-        bytes.withUnsafeBytes { Array($0) }
+        bytes.withSpan { span in (0..<span.count).map { span[$0] } }
     }
 
     // MARK: TTL = nil → no expiry

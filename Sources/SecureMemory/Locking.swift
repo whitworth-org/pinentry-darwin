@@ -56,15 +56,19 @@ func roundUpToPage(_ size: Int, pageSize: Int) -> Int {
 }
 
 /// Allocate `bytes` of anonymous, private, read/write memory via `mmap`. The
-/// returned pointer is page-aligned and the region is zero-filled by the
+/// returned buffer is page-aligned and the region is zero-filled by the
 /// kernel (anonymous mappings are guaranteed zeroed on Darwin).
 ///
 /// - Parameter bytes: must already be a multiple of the page size.
-/// - Returns: a pointer to the start of the mapping.
+/// - Returns: a buffer covering the whole mapping.
 /// - Throws: `SecureAllocError.mmapFailed` if the kernel refuses.
-func secureMmap(bytes: Int) throws -> UnsafeMutableRawPointer {
+// Safe to call: `mmap` with a nil address hint creates a fresh mapping and
+// cannot alias or invalidate existing memory. Using the returned buffer is
+// what is unsafe, and callers still have to acknowledge that.
+@safe
+func secureMmap(bytes: Int) throws -> UnsafeMutableBufferPointer<UInt8> {
     precondition(bytes > 0, "secureMmap requires a positive byte count")
-    let raw = mmap(
+    let raw = unsafe mmap(
         nil,
         bytes,
         PROT_READ | PROT_WRITE,
@@ -73,22 +77,26 @@ func secureMmap(bytes: Int) throws -> UnsafeMutableRawPointer {
         0
     )
     // `mmap` returns MAP_FAILED ((void *)-1) on error, not nil.
-    if raw == MAP_FAILED {
+    if unsafe raw == MAP_FAILED {
         throw SecureAllocError.mmapFailed(errno: errno)
     }
-    guard let raw else {
+    guard let raw = unsafe raw else {
         // Defensive — Darwin's `mmap` should never return nil on success, but
         // the Swift overlay types it as optional. Treat nil as failure.
         throw SecureAllocError.mmapFailed(errno: errno)
     }
-    return raw
+    let typed = unsafe raw.bindMemory(to: UInt8.self, capacity: bytes)
+    return unsafe UnsafeMutableBufferPointer(start: typed, count: bytes)
 }
 
 /// Unmap a region previously returned by `secureMmap`. Returns `true` on
-/// success. The caller has already wiped/unlocked the region.
+/// success. The caller has already wiped/unlocked the region and must not
+/// touch it afterwards.
+@unsafe
 @discardableResult
-func secureMunmap(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
-    return munmap(ptr, bytes) == 0
+func secureMunmap(_ region: UnsafeMutableBufferPointer<UInt8>) -> Bool {
+    guard let base = region.baseAddress else { return false }
+    return unsafe munmap(base, region.count) == 0
 }
 
 /// SL-4: when `PINENTRY_DARWIN_REQUIRE_MLOCK=1` is set in the environment,
@@ -98,11 +106,10 @@ func secureMunmap(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
 /// secret swap-eligible is unacceptable. Cached at module-init time so
 /// repeated lookups don't pay the syscall cost.
 private let strictMlockMode: Bool = {
-    if let v = getenv("PINENTRY_DARWIN_REQUIRE_MLOCK"),
-       let s = String(validatingCString: v) {
-        return s == "1" || s.lowercased() == "true" || s.lowercased() == "yes"
+    guard let s = ProcessInfo.processInfo.environment["PINENTRY_DARWIN_REQUIRE_MLOCK"] else {
+        return false
     }
-    return false
+    return s == "1" || s.lowercased() == "true" || s.lowercased() == "yes"
 }()
 
 /// Best-effort `mlock`. Returns `true` if the kernel locked the region into
@@ -116,8 +123,11 @@ private let strictMlockMode: Bool = {
 /// resource-limit condition. Subsequent failures stay silent unless
 /// `PINENTRY_DARWIN_REQUIRE_MLOCK=1` is set, in which case the process
 /// `abort()`s before any secret bytes can be written to a non-locked page.
-func secureMlock(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
-    let ok = mlock(ptr, bytes) == 0
+// Safe to call with any range: `mlock` only changes paging attributes and
+// reports an invalid range as ENOMEM; it never reads or writes the memory.
+@safe
+func secureMlock(_ region: UnsafeMutableBufferPointer<UInt8>) -> Bool {
+    let ok = unsafe mlock(region.baseAddress, region.count) == 0
     if !ok {
         let lockErr = errno
         let alreadyWarned = mlockWarnFlag.withLock { state -> Bool in
@@ -144,19 +154,23 @@ func secureMlock(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
 
 /// Counterpart to `secureMlock`. Returns `true` on success. Callers should
 /// only invoke this when `secureMlock` previously returned `true`.
+// Safe to call with any range, for the same reason as `secureMlock`.
+@safe
 @discardableResult
-func secureMunlock(_ ptr: UnsafeMutableRawPointer, bytes: Int) -> Bool {
-    return munlock(ptr, bytes) == 0
+func secureMunlock(_ region: UnsafeMutableBufferPointer<UInt8>) -> Bool {
+    unsafe munlock(region.baseAddress, region.count) == 0
 }
 
-/// Wipe `bytes` starting at `ptr` to zero. Uses `memset_s` so that the
+/// Wipe every byte of `region` to zero. Uses `memset_s` so that the
 /// optimiser cannot eliminate the write as a dead store (which a plain
 /// `memset` is allowed to do once the buffer goes out of scope).
 ///
 /// `memset_s` is part of C11 Annex K and is implemented in Darwin's libc.
+/// A non-zero return means the wipe did not happen, which for a secret
+/// buffer is not survivable, so it aborts.
+@unsafe
 @inline(never)
-func secureZero(_ ptr: UnsafeMutableRawPointer, bytes: Int) {
-    // The first two args are dest + destsz; the last two are the fill byte
-    // (cast to Int32 / `int`) and the count. Both sizes are the same here.
-    _ = memset_s(ptr, bytes, 0, bytes)
+func secureZero(_ region: UnsafeMutableBufferPointer<UInt8>) {
+    let status = unsafe memset_s(region.baseAddress, region.count, 0, region.count)
+    precondition(status == 0, "memset_s failed to wipe secret memory (errno_t=\(status))")
 }

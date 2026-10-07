@@ -8,7 +8,7 @@
 // Encoding rules:
 //   * `OK` is bare; `OK <text>` carries an optional comment.
 //   * `D <escaped-payload>` carries data; for PIN bytes we route through
-//     `SecureBytes.withUnsafeBytes` and emit the wire bytes into a
+//     `SecureBytes.withSpan` and emit the wire bytes into a
 //     SecureBytes-backed scratch buffer (mlock'd, deinit-zeroed) so the
 //     escaped form never lives in unwiped Foundation.Data heap (SL-1).
 //   * `S <KEYWORD> <params>` carries a status update.
@@ -25,9 +25,8 @@
 //   before returning to the caller. `wirePayloads()` therefore returns
 //   one `D` payload per chunk.
 
-import Foundation
-import Darwin
-import SecureMemory
+public import Foundation
+public import SecureMemory
 
 // MARK: - WirePayload
 
@@ -40,7 +39,7 @@ import SecureMemory
 ///     is byte-identical to the plaintext for ASCII passphrases) is not
 ///     left in the unwiped Foundation.Data heap. The Session writes
 ///     these directly via `Darwin.write()` from inside
-///     `SecureBytes.withUnsafeBytes`.
+///     `SecureBytes.withSpan`.
 public enum WirePayload: Sendable {
     case plain(Data)
     case secret(SecureBytes)
@@ -119,24 +118,6 @@ extension Response {
         }
     }
 
-    /// Backwards-compatibility shim. Old callers that only handle
-    /// `Data` payloads get the legacy view: secret payloads are
-    /// materialised into ordinary Data, defeating the SL-1 guarantee.
-    /// New code must use `wirePayloads()` and the Session
-    /// `writeAll(_:WirePayload)` path. Marked deprecated to keep an
-    /// audit trail of any caller still on the old API.
-    @available(*, deprecated, message: "Use wirePayloads() so secret payloads stay in SecureBytes.")
-    public func wireLines() -> [Data] {
-        wirePayloads().map { payload -> Data in
-            switch payload {
-            case .plain(let d): return d
-            case .secret(let secure):
-                // Last-resort copy. New code must NOT take this path.
-                return secure.withUnsafeBytes { Data($0) }
-            }
-        }
-    }
-
     // MARK: - Helpers
 
     /// Maximum source bytes per single secret `D` line. Each source
@@ -194,8 +175,8 @@ extension Response {
     /// command-arg encoder here would corrupt any passphrase that
     /// contained a space.
     private func encodeSecretDataLines(_ secure: SecureBytes) -> [WirePayload] {
-        return secure.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> [WirePayload] in
-            let total = buf.count
+        secure.withSpan { span -> [WirePayload] in
+            let total = span.count
             if total == 0 {
                 // Empty payload still needs an empty `D` line so the
                 // receiver sees the (zero-length) value — degenerate
@@ -210,8 +191,7 @@ extension Response {
             var offset = 0
             while offset < total {
                 let chunkLen = Swift.min(Self.maxSourceBytesPerDataLine, total - offset)
-                let chunkBase = buf.baseAddress!.advanced(by: offset)
-                let chunk = UnsafeBufferPointer(start: chunkBase, count: chunkLen)
+                let chunk = span.extracting(offset..<(offset + chunkLen))
                 // Worst-case escape size: 3 * chunkLen + 3 (`D ` + LF).
                 // Cap respects SecureBytes.maxLength (16 KiB), which is
                 // far above 3*332+3 = 999.
@@ -234,7 +214,8 @@ extension Response {
     /// mlock page on) a SecureBytes for bytes that are not sensitive.
     /// FZ-1: chunked to respect the wire-line cap.
     private func encodePlaintextDataLines(_ payload: Data) -> [Data] {
-        let total = payload.count
+        let span = payload.span
+        let total = span.count
         if total == 0 {
             var d = Data()
             d.append(0x44) // 'D'
@@ -242,26 +223,21 @@ extension Response {
             d.append(0x0A) // LF
             return [d]
         }
-        return payload.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> [Data] in
-            guard let base = raw.baseAddress?.assumingMemoryBound(to: UInt8.self) else {
-                return []
-            }
-            var result: [Data] = []
-            var offset = 0
-            while offset < total {
-                let chunkLen = Swift.min(Self.maxSourceBytesPerDataLine, total - offset)
-                let chunk = UnsafeBufferPointer(start: base.advanced(by: offset), count: chunkLen)
-                var d = Data()
-                d.reserveCapacity(2 + chunk.count * 3 + 1)
-                d.append(0x44) // 'D'
-                d.append(0x20) // ' '
-                LineCodec.escapeForDataLine(chunk, into: &d)
-                d.append(0x0A) // LF
-                result.append(d)
-                offset += chunkLen
-            }
-            return result
+        var result: [Data] = []
+        var offset = 0
+        while offset < total {
+            let chunkLen = Swift.min(Self.maxSourceBytesPerDataLine, total - offset)
+            let chunk = span.extracting(offset..<(offset + chunkLen))
+            var d = Data()
+            d.reserveCapacity(2 + chunk.count * 3 + 1)
+            d.append(0x44) // 'D'
+            d.append(0x20) // ' '
+            LineCodec.escapeForDataLine(chunk, into: &d)
+            d.append(0x0A) // LF
+            result.append(d)
+            offset += chunkLen
         }
+        return result
     }
 }
 
@@ -274,10 +250,11 @@ extension LineCodec {
     /// LineCodec stays Foundation-only and only this file knows about
     /// the SecureBytes sink.
     static func escapeForDataLine(
-        _ bytes: UnsafeBufferPointer<UInt8>,
+        _ bytes: Span<UInt8>,
         into out: SecureBytes
     ) {
-        for b in bytes {
+        for i in bytes.indices {
+            let b = bytes[i]
             switch b {
             case 0x2B, 0x25, 0..<0x20, 0x7F...0xFF:
                 // %HH (uppercase) per upstream `%02X` formatting.

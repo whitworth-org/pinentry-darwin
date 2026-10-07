@@ -11,6 +11,8 @@
 // a user reports such a symptom we can localise the issue to the
 // SwiftUI/AppKit boundary instead of the data flow.
 
+import Foundation
+import SecureMemory
 import XCTest
 @testable import PinentryUI
 
@@ -68,7 +70,7 @@ final class PinViewModelTests: XCTestCase {
             return
         }
         XCTAssertFalse(saved, "saveByDefault=false should not flip saved=true")
-        let observed = bytes.withUnsafeBytes { Data($0) }
+        let observed = contents(of: bytes)
         XCTAssertEqual(observed, Data("correcthorsebatterystaple".utf8))
     }
 
@@ -217,7 +219,7 @@ final class PinViewModelTests: XCTestCase {
         // Egress buffer is the model's own `pin`; it must still hold the
         // typed bytes so the consumer can write them to the wire.
         XCTAssertEqual(bytes.count, 5, "submit must NOT zero the egress pin buffer")
-        let observed = bytes.withUnsafeBytes { Data($0) }
+        let observed = contents(of: bytes)
         XCTAssertEqual(observed, Data("alpha".utf8))
         // The repeat buffer never egresses, so submit zeros it immediately.
         XCTAssertEqual(model.repeatPin.count, 0, "submit must zero the repeat buffer")
@@ -232,6 +234,83 @@ final class PinViewModelTests: XCTestCase {
         XCTAssertEqual(model.pin.count, 0)
         model.wipe()
         XCTAssertEqual(model.pin.count, 0)
+    }
+
+    // A late cancel (or close / timeout) after submit() must neither fire a
+    // second result nor zero the egress buffer the consumer is about to
+    // write to the wire.
+    @MainActor
+    func testLateTerminalCallsAfterSubmitKeepEgressPin() {
+        var delivered: DialogResult?
+        let model = PinViewModel(
+            spec: DialogSpec(kind: .pin),
+            showTypingByDefault: false,
+            saveByDefault: false,
+            onResult: { delivered = $0 }
+        )
+        model.setPin(from: "alpha")
+        model.submit()
+        model.cancel()
+        model.windowClosed()
+        model.timedOut()
+        model.notConfirmed()
+
+        guard case .pin(let bytes, _) = delivered else {
+            XCTFail("expected .pin result, got \(String(describing: delivered))")
+            return
+        }
+        XCTAssertEqual(contents(of: bytes), Data("alpha".utf8))
+    }
+
+    // MARK: - Truncation
+
+    // The pin buffer holds 1024 bytes. Anything longer would be cut short,
+    // and sending the prefix to gpg-agent as if it were the passphrase is
+    // worse than refusing to submit.
+    @MainActor
+    func testOverlongPinCannotBeSubmitted() {
+        var delivered: DialogResult?
+        let model = PinViewModel(
+            spec: DialogSpec(kind: .pin),
+            showTypingByDefault: false,
+            saveByDefault: false,
+            onResult: { delivered = $0 }
+        )
+        model.setPin(from: String(repeating: "a", count: 1024))
+        XCTAssertFalse(model.pinTruncated)
+        XCTAssertTrue(model.canSubmit, "exactly capacity bytes fit")
+
+        model.setPin(from: String(repeating: "a", count: 1025))
+        XCTAssertTrue(model.pinTruncated)
+        XCTAssertFalse(model.canSubmit)
+        model.submit()
+        XCTAssertNil(delivered, "a truncated passphrase must not egress")
+
+        model.setPin(from: "short")
+        XCTAssertFalse(model.pinTruncated, "shortening the input clears the flag")
+        XCTAssertTrue(model.canSubmit)
+    }
+
+    @MainActor
+    func testOverlongRepeatBlocksSubmit() {
+        var spec = DialogSpec(kind: .pin)
+        spec.repeatPrompt = "Repeat:"
+        let model = PinViewModel(
+            spec: spec,
+            showTypingByDefault: false,
+            saveByDefault: false,
+            onResult: { _ in }
+        )
+        let exact = String(repeating: "a", count: 1024)
+        model.setPin(from: exact)
+        model.setRepeat(from: exact + "b")
+        XCTAssertTrue(model.pinsMatch, "truncated copies compare equal")
+        XCTAssertTrue(model.repeatTruncated)
+        XCTAssertFalse(model.canSubmit)
+    }
+
+    private func contents(of secure: SecureBytes) -> Data {
+        secure.withSpan { span in Data((0..<span.count).map { span[$0] }) }
     }
 
     @MainActor

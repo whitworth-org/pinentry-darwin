@@ -68,11 +68,11 @@
 //     layout). The `.userPresence` ACL on the keychain entry is the
 //     only protection in this mode.
 
-import Foundation
 import CryptoKit
-import LocalAuthentication
+public import Foundation
+public import LocalAuthentication
 import Security
-import SecureMemory
+public import SecureMemory
 import os
 
 private let log = Logger(
@@ -148,7 +148,8 @@ public struct SEWrapKeyStore: @unchecked Sendable {
         query[kSecUseAuthenticationUI as String] = kSecUseAuthenticationUISkip
 
         var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        // `&item` is a valid out-pointer for the duration of the call.
+        let status = unsafe SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess,
               let data = item as? Data,
               !data.isEmpty
@@ -228,6 +229,14 @@ public enum SecureEnclaveWrap {
             && blob[blob.index(after: blob.startIndex)] == x963Uncompressed
     }
 
+    /// Same discriminator for a keychain payload still held in `SecureBytes`. Inspects only the
+    /// two marker bytes so a legacy plaintext passphrase is never copied out of locked memory.
+    static func isWrapped(_ bytes: SecureBytes) -> Bool {
+        bytes.withSpan { span in
+            span.count >= 2 && span[0] == currentVersion && span[1] == x963Uncompressed
+        }
+    }
+
     // MARK: Wrap
 
     /// Wrap `passphrase` under the per-fingerprint SE key. Generates the
@@ -247,11 +256,6 @@ public enum SecureEnclaveWrap {
         store: SEWrapKeyStore = SEWrapKeyStore()
     ) throws -> Data {
         guard isAvailable else { throw SecureEnclaveWrapError.enclaveUnavailable }
-
-        // SecureBytes inits precondition-fail on zero-capacity input, so
-        // `passphrase.withUnsafeBytes` here is guaranteed to receive a
-        // non-nil base and a positive count. The seal-step force-unwrap
-        // is safe under that invariant.
 
         // 1. Load or generate the SE key.
         let seKey = try loadOrGenerateWrapKey(
@@ -294,13 +298,12 @@ public enum SecureEnclaveWrap {
             outputByteCount: 32
         )
 
-        // 5. AES-GCM seal. CryptoKit picks a random 12-byte nonce.
-        //    Bridge the SecureBytes buffer to Data via `bytesNoCopy` with
-        //    a `.none` deallocator so Foundation does not allocate a
-        //    separate (un-mlock'd, un-zeroed) heap copy of the plaintext.
-        //    SecureBytes owns the memory; `pt` is a view only. CryptoKit
-        //    may still copy internally for its own scratch buffer — that
-        //    copy is outside our control and is the residual SL-2 risk.
+        // 5. AES-GCM seal. CryptoKit picks a random 12-byte nonce. The
+        //    plaintext is passed as a raw buffer view over the SecureBytes
+        //    page so Foundation does not allocate a separate (un-mlock'd,
+        //    un-zeroed) heap copy of it. CryptoKit may still copy internally
+        //    for its own scratch buffer — that copy is outside our control and
+        //    is the residual SL-2 risk.
         //
         //    SL-5: authenticate the (lowercased) fingerprint as AAD so the
         //    blob is cryptographically bound to the account it is filed
@@ -309,13 +312,12 @@ public enum SecureEnclaveWrap {
         //    matching SE key — closing the relocation lever together with
         //    the keychain-backed handle store (SL-4).
         let aad = Data(fingerprint.lowercased().utf8)
-        let sealed = try passphrase.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> AES.GCM.SealedBox in
-            // step-0 above guarantees baseAddress non-nil and count > 0.
-            let base = buf.baseAddress!
+        let sealed = try unsafe passphrase.withUnsafeBytes { buf -> AES.GCM.SealedBox in
             do {
-                let mutable = UnsafeMutableRawPointer(mutating: UnsafeRawPointer(base))
-                let pt = Data(bytesNoCopy: mutable, count: buf.count, deallocator: .none)
-                return try AES.GCM.seal(pt, using: aesKey, authenticating: aad)
+                // The view is only read during `seal` and not retained past this closure.
+                return try unsafe AES.GCM.seal(
+                    UnsafeRawBufferPointer(buf), using: aesKey, authenticating: aad
+                )
             } catch {
                 throw SecureEnclaveWrapError.sealedBoxFailed(String(describing: error))
             }
@@ -446,17 +448,14 @@ public enum SecureEnclaveWrap {
         //    is the documented residual SL-2 risk and matches the
         //    encrypt-side acceptance.
         defer {
-            plaintext.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) in
+            // `memset_s` is not elided by the optimizer, and writes only within the buffer.
+            unsafe plaintext.withUnsafeMutableBytes { raw in
                 if let base = raw.baseAddress, raw.count > 0 {
-                    _ = memset_s(base, raw.count, 0, raw.count)
+                    _ = unsafe memset_s(base, raw.count, 0, raw.count)
                 }
             }
         }
-        let secure = plaintext.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> SecureBytes in
-            let typed = raw.bindMemory(to: UInt8.self)
-            return SecureBytes(copying: typed)
-        }
-        return secure
+        return SecureBytes(copying: plaintext.span)
     }
 
     // MARK: SE key lifecycle
@@ -479,7 +478,7 @@ public enum SecureEnclaveWrap {
     /// CONCURRENCY: load-check-generate-store is not atomic. Two concurrent
     /// `wrap` calls for the same fingerprint can both observe a missing
     /// rep, both generate fresh SE keys, and have one silently overwrite
-    /// the other in UserDefaults — orphaning the first SE key and making
+    /// the other in the keychain — orphaning the first SE key and making
     /// the first wrap blob undecryptable. This is acceptable because
     /// gpg-agent drives pinentry from a serial Assuan loop (one operation
     /// at a time per pinentry process), and Settings UI writes are
@@ -507,16 +506,11 @@ public enum SecureEnclaveWrap {
 
         // Generate. SecAccessControl built from KeyPolicy so unwrap
         // honours the user's chosen biometry tier.
-        var cfError: Unmanaged<CFError>?
-        guard let control = SecAccessControlCreateWithFlags(
-            kCFAllocatorDefault,
-            policy.secAccessibility,
-            policy.secAccessControlFlags,
-            &cfError
-        ) else {
-            let detail = cfError.map { String(describing: $0.takeRetainedValue()) }
-                ?? "SecAccessControlCreateWithFlags returned nil"
-            throw SecureEnclaveWrapError.generationFailed("access-control: \(detail)")
+        let control: SecAccessControl
+        do {
+            control = try policy.makeSecAccessControl()
+        } catch {
+            throw SecureEnclaveWrapError.generationFailed("access-control: \(error.detail)")
         }
 
         let key: SecureEnclave.P256.KeyAgreement.PrivateKey

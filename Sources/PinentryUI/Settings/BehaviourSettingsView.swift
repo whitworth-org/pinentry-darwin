@@ -3,7 +3,7 @@
 //
 // BehaviourSettingsView.swift — Settings → Behaviour tab.
 
-import SwiftUI
+public import SwiftUI
 
 public struct BehaviourSettingsView: View {
     @Binding public var settings: UISettings
@@ -33,16 +33,9 @@ public struct BehaviourSettingsView: View {
                     }
                 }
                 .onChange(of: settings.defaultTimeout) { _, _ in onChange(settings) }
-            }
-
-            Section("Window") {
-                Toggle("Close on focus loss", isOn: $settings.closeOnBlur)
-                    .onChange(of: settings.closeOnBlur) { _, _ in onChange(settings) }
-            }
-
-            Section("Feedback") {
-                Toggle("Beep on weak passphrase", isOn: $settings.beepOnWeakPassphrase)
-                    .onChange(of: settings.beepOnWeakPassphrase) { _, _ in onChange(settings) }
+                Text("Used when gpg-agent does not request a timeout of its own.")
+                    .font(Theme.captionFont)
+                    .foregroundStyle(Color.secondary)
             }
 
             Section("Security") {
@@ -61,6 +54,5 @@ public struct BehaviourSettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(Theme.mediumPadding)
     }
 }
