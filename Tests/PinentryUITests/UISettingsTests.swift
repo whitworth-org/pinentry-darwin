@@ -22,8 +22,7 @@ final class UISettingsTests: XCTestCase {
         let (store, defaults, suite) = try makeStore()
         defer { defaults.removePersistentDomain(forName: suite) }
         let settings = UISettings(
-            theme: .dark, defaultTimeout: 45,
-            secureKeyboardEntry: false, clearPasteboardOnSubmit: false)
+            theme: .dark, defaultTimeout: 45, clearPasteboardOnSubmit: false)
 
         await store.save(settings)
 
@@ -55,7 +54,7 @@ final class UISettingsTests: XCTestCase {
 
         XCTAssertEqual(loaded.theme, .light)
         XCTAssertEqual(loaded.defaultTimeout, 20)
-        XCTAssertFalse(loaded.secureKeyboardEntry)
+        XCTAssertTrue(loaded.clearPasteboardOnSubmit)
     }
 
     func testCorruptBlobLoadsDefaults() async throws {

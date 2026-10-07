@@ -16,12 +16,6 @@ import KeychainStore
 public struct PinView: View {
     public let spec: DialogSpec
 
-    /// Whether to enable Carbon's secure keyboard entry while this view
-    /// is on screen. Driven by UISettings.secureKeyboardEntry; the
-    /// coordinator threads it through so the view doesn't need to
-    /// observe UISettingsStore itself.
-    public let secureKeyboardEntry: Bool
-
     /// Whether to wipe `NSPasteboard.general` on submit when the change
     /// count advanced during the dialog's lifetime (i.e. the user
     /// paste-filled the passphrase). Driven by
@@ -60,12 +54,10 @@ public struct PinView: View {
     public init(
         spec: DialogSpec,
         model: PinViewModel,
-        secureKeyboardEntry: Bool = true,
         clearPasteboardOnSubmit: Bool = true
     ) {
         self.spec = spec
         self.model = model
-        self.secureKeyboardEntry = secureKeyboardEntry
         self.clearPasteboardOnSubmit = clearPasteboardOnSubmit
     }
 
@@ -98,10 +90,10 @@ public struct PinView: View {
     }
 
     /// Engage secure keyboard entry as the very first thing, before the field
-    /// gets focus, so no keystroke can land in an unprotected window. Skipped
-    /// if the user disabled it in Settings.
+    /// gets focus, so no keystroke can land in an unprotected window. It is
+    /// not configurable.
     private func engageProtections() {
-        if secureKeyboardEntry, SecureInput.enable() {
+        if SecureInput.enable() {
             skeActive = true
         }
 

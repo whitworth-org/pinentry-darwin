@@ -119,7 +119,6 @@ public final class PinentryCoordinator {
             let root = PinView(
                 spec: spec,
                 model: model,
-                secureKeyboardEntry: settings.secureKeyboardEntry,
                 clearPasteboardOnSubmit: settings.clearPasteboardOnSubmit
             )
             window = makePinentryWindow(rootView: root, title: spec.title, theme: settings.theme)

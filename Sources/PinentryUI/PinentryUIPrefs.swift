@@ -24,13 +24,6 @@ public struct UISettings: Sendable, Codable, Equatable {
     /// Seconds before a dialog gives up when gpg-agent sent no SETTIMEOUT.
     /// 0 disables the fallback. Range 0…600 in the UI.
     public var defaultTimeout: Int = 0
-    /// Enable Carbon's `EnableSecureEventInput` for the GETPIN dialog so
-    /// other processes cannot observe keystrokes during passphrase
-    /// entry. Default ON: pinentry-darwin's modal exists *only* to
-    /// receive a secret. Power users with accessibility tooling that
-    /// conflicts with SKE can disable. Matches the behaviour Apple's
-    /// Keychain Access prompts use.
-    public var secureKeyboardEntry: Bool = true
     /// When the user paste-fills the passphrase field, wipe
     /// `NSPasteboard.general` on submit so the cleartext doesn't
     /// linger in the system clipboard. Detected via change-count
@@ -40,12 +33,10 @@ public struct UISettings: Sendable, Codable, Equatable {
     public init(
         theme: Theme = .system,
         defaultTimeout: Int = 0,
-        secureKeyboardEntry: Bool = true,
         clearPasteboardOnSubmit: Bool = true
     ) {
         self.theme = theme
         self.defaultTimeout = defaultTimeout
-        self.secureKeyboardEntry = secureKeyboardEntry
         self.clearPasteboardOnSubmit = clearPasteboardOnSubmit
     }
 }
