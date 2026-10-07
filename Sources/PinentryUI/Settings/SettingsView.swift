@@ -4,22 +4,25 @@
 // SettingsView.swift — the root TabView for the `--preferences` mode.
 // Hosted by the executable when invoked with the preferences flag.
 
-import SwiftUI
-import KeychainStore
+public import SwiftUI
+public import KeychainStore
 
 public struct SettingsRootView: View {
 
     @State private var uiSettings: UISettings
     @State private var keychainPrefs: UserPrefs
+    @State private var selection: SettingsTab
 
     /// Optional closure to clear all stored passphrases. Wired up by the
-    /// executable (KeychainStore.clearAll). nil shows "Coming soon".
-    private let clearAllPassphrases: (@Sendable () async -> Void)?
+    /// executable. Throws if any delete failed. nil hides the Maintenance
+    /// section in the Keychain tab.
+    private let clearAllPassphrases: (@concurrent @Sendable () async throws -> Void)?
 
     /// Optional closure to forget a single stored passphrase by
     /// fingerprint. Wired up by the executable (KeychainStore.clear).
-    /// nil disables the per-row Forget button in PerKeyPolicyView.
-    private let forgetPassphrase: (@Sendable (String) async -> Void)?
+    /// Throws if the delete failed. nil hides the per-row Forget action in
+    /// PerKeyPolicyView.
+    private let forgetPassphrase: PerKeyPolicyView.ForgetCallback?
 
     /// Optional persistence hook. The executable typically passes a
     /// closure that calls `await UISettingsStore().save(_:)`.
@@ -28,10 +31,29 @@ public struct SettingsRootView: View {
     public init(
         uiSettings: UISettings = UISettings(),
         keychainPrefs: UserPrefs = UserPrefs(),
-        clearAllPassphrases: (@Sendable () async -> Void)? = nil,
-        forgetPassphrase: (@Sendable (String) async -> Void)? = nil,
+        clearAllPassphrases: (@concurrent @Sendable () async throws -> Void)? = nil,
+        forgetPassphrase: PerKeyPolicyView.ForgetCallback? = nil,
         saveUI: (@Sendable (UISettings) -> Void)? = nil
     ) {
+        self.init(
+            uiSettings: uiSettings,
+            keychainPrefs: keychainPrefs,
+            clearAllPassphrases: clearAllPassphrases,
+            forgetPassphrase: forgetPassphrase,
+            saveUI: saveUI,
+            selection: .appearance
+        )
+    }
+
+    init(
+        uiSettings: UISettings,
+        keychainPrefs: UserPrefs,
+        clearAllPassphrases: (@concurrent @Sendable () async throws -> Void)?,
+        forgetPassphrase: PerKeyPolicyView.ForgetCallback?,
+        saveUI: (@Sendable (UISettings) -> Void)?,
+        selection: SettingsTab
+    ) {
+        self._selection = State(initialValue: selection)
         self._uiSettings = State(initialValue: uiSettings)
         self._keychainPrefs = State(initialValue: keychainPrefs)
         self.clearAllPassphrases = clearAllPassphrases
@@ -40,42 +62,44 @@ public struct SettingsRootView: View {
     }
 
     public var body: some View {
-        TabView {
+        content
+            .formStyle(.grouped)
+            .frame(
+                minWidth: SettingsLayout.minWidth,
+                idealWidth: SettingsLayout.idealWidth,
+                minHeight: SettingsLayout.minHeight,
+                idealHeight: SettingsLayout.idealHeight
+            )
+            .background(SettingsToolbarInstaller(selection: $selection))
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch selection {
+        case .appearance:
             AppearanceSettingsView(
                 settings: $uiSettings,
                 keychainPrefs: $keychainPrefs,
                 onChange: { saveUI?($0) }
             )
-            .tabItem { Label("Appearance", systemImage: "paintbrush") }
-
-            KeychainSettingsView(
-                keychainPrefs: $keychainPrefs,
-                clearAll: clearAllPassphrases
-            )
-            .tabItem { Label("Keychain", systemImage: "key") }
-
+        case .behaviour:
+            BehaviourSettingsView(settings: $uiSettings, onChange: { saveUI?($0) })
+        case .keychain:
+            KeychainSettingsView(keychainPrefs: $keychainPrefs, clearAll: clearAllPassphrases)
+        case .perKey:
             PerKeyPolicyView(forget: forgetPassphrase)
-                .tabItem { Label("Per-Key", systemImage: "person.badge.key") }
-
-            BehaviourSettingsView(
-                settings: $uiSettings,
-                onChange: { saveUI?($0) }
-            )
-            .tabItem { Label("Behaviour", systemImage: "slider.horizontal.3") }
-
-            Group {
-                if #available(macOS 26.0, *) {
-                    SSHIdentitiesView()
-                } else {
-                    SSHIdentitiesUnavailableView()
-                }
-            }
-            .tabItem { Label("SSH", systemImage: "key.horizontal") }
-
+        case .ssh:
+            SSHIdentitiesView()
+        case .about:
             AboutView()
-                .tabItem { Label("About", systemImage: "info.circle") }
         }
-        .frame(minWidth: 520, minHeight: 360)
-        .padding(Theme.mediumPadding)
     }
+}
+
+/// One size for every tab so the window never resizes when switching.
+enum SettingsLayout {
+    static let minWidth: CGFloat = 560
+    static let idealWidth: CGFloat = 600
+    static let minHeight: CGFloat = 440
+    static let idealHeight: CGFloat = 520
 }

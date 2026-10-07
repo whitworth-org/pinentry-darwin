@@ -48,9 +48,7 @@ while i < argv.count {
     i += 1
 }
 
-var isDirectory: ObjCBool = false
-if !FileManager.default.fileExists(atPath: bundlePath, isDirectory: &isDirectory)
-    || !isDirectory.boolValue {
+if !directoryExists(atPath: bundlePath) {
     let line = "audit: bundle not found at \(bundlePath)\n"
     if let data = line.data(using: .utf8) {
         FileHandle.standardError.write(data)

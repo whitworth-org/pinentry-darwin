@@ -38,8 +38,8 @@ class PinentryDarwin < Formula
     url "https://github.com/whitworth-org/pinentry-darwin.git", branch: "main"
   end
 
-  depends_on macos: :sequoia
-  depends_on xcode: ["16.0", :build]
+  depends_on macos: :tahoe
+  depends_on xcode: ["26.0", :build]
 
   def install
     if build.head?

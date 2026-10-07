@@ -3,11 +3,12 @@
 //
 // SecureBytes — an mlock'd, deinit-zeroed byte buffer for passphrases and
 // other secrets that must not survive the lifetime of the object that owns
-// them. The single ingress points are `[UInt8]` and
-// `UnsafeBufferPointer<UInt8>`; `Swift.String` is intentionally absent.
+// them. The ingress points are `[UInt8]` and `Span<UInt8>`; `Swift.String`
+// is intentionally absent. The pointer-based entry points are `@unsafe`
+// and kept only until their remaining callers move to `Span`.
 
 import Darwin
-import Foundation
+import Synchronization
 
 /// A heap buffer of bytes whose backing pages are allocated via `mmap`,
 /// (best-effort) locked into physical memory via `mlock`, and explicitly
@@ -15,10 +16,12 @@ import Foundation
 ///
 /// ### Thread safety
 ///
-/// `SecureBytes` is **not** thread-safe. It is marked `@unchecked Sendable`
-/// purely so it can be passed across actor boundaries by the rest of the
-/// codebase; any concurrent access to the same instance must be externally
-/// synchronised by the caller.
+/// The valid-byte count is guarded by a mutex, so concurrent `append` and
+/// `reset` calls can never push `count` past `capacity` or write out of
+/// bounds. Byte *contents* are not synchronised against a concurrent
+/// reader: a `withSpan` borrow that overlaps an `append` or `reset` on
+/// another thread may observe the bytes change, but never invalid memory.
+/// Callers that need a stable view must serialise access themselves.
 ///
 /// ### Caller responsibilities
 ///
@@ -29,6 +32,12 @@ import Foundation
 /// - `append(_:)` and `append(contentsOf:)` will trap (`fatalError`) on
 ///   overflow rather than auto-growing — auto-grow would require copying
 ///   into a new mapping and could leave residue in the freed pages.
+// SAFETY: `region` is created in `init`, never replaced, and unmapped only
+// in `deinit`, so it is valid for the whole life of every method call. The
+// only mutable state, `_count`, is behind a `Mutex` and is only ever set to
+// a value in `0...capacity`, so every access through `region` is in
+// bounds. Pointers never leave the type through a safe member.
+@safe
 public final class SecureBytes: @unchecked Sendable {
 
     /// Hard cap on the size of any single `SecureBytes` instance. PIN buffers
@@ -38,16 +47,12 @@ public final class SecureBytes: @unchecked Sendable {
     /// would seriously dent `RLIMIT_MEMLOCK` on a stock macOS system.
     public static let maxLength: Int = 16 * 1024
 
-    /// Backing mapping. Always non-nil for the lifetime of the instance;
-    /// freed in `deinit`.
-    private let ptr: UnsafeMutableRawPointer
-    /// Number of bytes mapped — always a multiple of the system page size and
-    /// `>= requested capacity`.
-    private let mappedBytes: Int
-    /// Logical capacity (≤ `mappedBytes`). What `append` bounds-checks against.
+    /// The whole mapping (`mappedBytes` long). Freed in `deinit`.
+    private let region: UnsafeMutableBufferPointer<UInt8>
+    /// Logical capacity (≤ `region.count`). What `append` bounds-checks against.
     private let _capacity: Int
-    /// Number of valid bytes currently stored at `ptr[0..<count]`.
-    private var _count: Int
+    /// Number of valid bytes currently stored at `region[0..<count]`.
+    private let _count = Mutex<Int>(0)
     /// Whether `mlock` succeeded. Drives whether `deinit` calls `munlock`.
     private let wasLocked: Bool
 
@@ -66,14 +71,13 @@ public final class SecureBytes: @unchecked Sendable {
         precondition(capacity <= SecureBytes.maxLength,
                      "SecureBytes capacity \(capacity) exceeds maxLength \(SecureBytes.maxLength)")
 
-        let pageSize = Int(getpagesize())
-        let mapped = roundUpToPage(capacity, pageSize: pageSize)
+        let mapped = roundUpToPage(capacity, pageSize: Int(getpagesize()))
 
         // `mmap` failure is fatal — there's no graceful path: the rest of
-        // this class assumes `ptr` is valid for `mappedBytes`.
-        let raw: UnsafeMutableRawPointer
+        // this class assumes `region` is valid.
+        let mapping: UnsafeMutableBufferPointer<UInt8>
         do {
-            raw = try secureMmap(bytes: mapped)
+            unsafe mapping = try secureMmap(bytes: mapped)
         } catch {
             fatalError("SecureBytes: \(error)")
         }
@@ -83,130 +87,137 @@ public final class SecureBytes: @unchecked Sendable {
         //   - sandboxed processes denied mlock by the kernel.
         // We continue rather than abort; the buffer is still mmap'd-anonymous
         // (so it isn't backed by any file) and will still be zeroed on deinit.
-        self.wasLocked = secureMlock(raw, bytes: mapped)
-
-        self.ptr = raw
-        self.mappedBytes = mapped
+        self.wasLocked = secureMlock(mapping)
+        unsafe self.region = mapping
         self._capacity = capacity
-        self._count = 0
     }
 
-    /// Copy `bytes` into a fresh `SecureBytes` whose capacity exactly matches
-    /// the input length. The source buffer is not wiped — the caller still
-    /// owns it.
-    public init(copying bytes: UnsafeBufferPointer<UInt8>) {
-        precondition(bytes.count > 0,
+    /// Copy `span` into a fresh `SecureBytes` whose capacity exactly matches
+    /// the input length. The source is not wiped — the caller still owns it.
+    ///
+    /// - Precondition: `0 < span.count <= SecureBytes.maxLength`.
+    public convenience init(copying span: Span<UInt8>) {
+        precondition(span.count > 0,
                      "SecureBytes(copying:) requires a non-empty buffer")
-        precondition(bytes.count <= SecureBytes.maxLength,
-                     "SecureBytes(copying:) input length \(bytes.count) exceeds maxLength \(SecureBytes.maxLength)")
+        precondition(span.count <= SecureBytes.maxLength,
+                     "SecureBytes(copying:) input length \(span.count) exceeds "
+                     + "maxLength \(SecureBytes.maxLength)")
+        self.init(capacity: span.count)
+        append(contentsOf: span)
+    }
 
-        let pageSize = Int(getpagesize())
-        let mapped = roundUpToPage(bytes.count, pageSize: pageSize)
-
-        let raw: UnsafeMutableRawPointer
-        do {
-            raw = try secureMmap(bytes: mapped)
-        } catch {
-            fatalError("SecureBytes: \(error)")
-        }
-
-        self.wasLocked = secureMlock(raw, bytes: mapped)
-        self.ptr = raw
-        self.mappedBytes = mapped
-        self._capacity = bytes.count
-        self._count = bytes.count
-
-        // Copy the source bytes into the freshly mapped region. Anonymous
-        // mmap pages are zero-filled, so the tail (if `mapped > count`)
-        // already reads as zero.
-        if let base = bytes.baseAddress {
-            raw.copyMemory(from: UnsafeRawPointer(base), byteCount: bytes.count)
-        }
+    /// Copy the bytes of `buffer`. Prefer `init(copying: Span<UInt8>)`.
+    ///
+    /// - Precondition: `buffer` is valid for `buffer.count` bytes, and
+    ///   `0 < buffer.count <= SecureBytes.maxLength`.
+    @unsafe
+    public convenience init(copying buffer: UnsafeBufferPointer<UInt8>) {
+        self.init(copying: unsafe Span(_unsafeElements: buffer))
     }
 
     /// Convenience: copy a `[UInt8]`. The array's storage is **not** wiped —
     /// `Array<UInt8>` is value-typed and the caller still owns it. If the
     /// input is sensitive, wipe it explicitly after this initialiser returns.
     public convenience init(_ bytes: [UInt8]) {
-        // Swift's two-phase init lets the convenience init delegate to
-        // the designated `init(capacity:)` and then call `self.append`.
-        // Earlier versions of this initialiser routed through a temporary
-        // `SecureBytes(copying:)`, which allocated and mlock'd a second
-        // page only to copy out of it again. The direct path is
-        // semantically equivalent and avoids that intermediate mapping.
         self.init(capacity: bytes.count)
-        bytes.withUnsafeBufferPointer { buf in
-            self.append(contentsOf: buf)
-        }
+        append(contentsOf: bytes.span)
     }
 
     // MARK: - Public accessors
 
     /// Number of valid bytes currently stored. Mutates via `append` / `reset`.
-    public var count: Int { _count }
+    public var count: Int { _count.withLock { $0 } }
 
     /// Logical capacity in bytes (the value passed to `init(capacity:)` or
-    /// the length of the source buffer for `init(copying:)`).
+    /// the length of the source for `init(copying:)`).
     public var capacity: Int { _capacity }
 
     /// `true` iff `count == 0`.
-    public var isEmpty: Bool { _count == 0 }
+    public var isEmpty: Bool { count == 0 }
 
     // MARK: - Mutation
 
     /// Append a single byte. Traps if there is no capacity left — auto-grow
     /// would leak residue into freed pages.
     public func append(_ byte: UInt8) {
-        if _count >= _capacity {
-            fatalError("SecureBytes overflow: capacity=\(_capacity), count=\(_count), wanted=1")
+        _count.withLock { count in
+            guard count < _capacity else {
+                fatalError("SecureBytes overflow: capacity=\(_capacity), count=\(count), wanted=1")
+            }
+            unsafe region[count] = byte
+            count += 1
         }
-        ptr.storeBytes(of: byte, toByteOffset: _count, as: UInt8.self)
-        _count += 1
     }
 
     /// Append the contents of `bytes`. Traps on overflow (see `append`).
-    public func append(contentsOf bytes: UnsafeBufferPointer<UInt8>) {
+    public func append(contentsOf bytes: Span<UInt8>) {
         let n = bytes.count
         if n == 0 { return }
-        if _count + n > _capacity {
-            fatalError("SecureBytes overflow: capacity=\(_capacity), count=\(_count), wanted=\(n)")
+        _count.withLock { count in
+            guard n <= _capacity - count else {
+                fatalError(
+                    "SecureBytes overflow: capacity=\(_capacity), count=\(count), wanted=\(n)")
+            }
+            for i in 0..<n {
+                unsafe region[count + i] = bytes[i]
+            }
+            count += n
         }
-        if let base = bytes.baseAddress {
-            (ptr + _count).copyMemory(from: UnsafeRawPointer(base), byteCount: n)
-        }
-        _count += n
     }
 
-    /// Zero the bytes `0..<count` and reset `count` to zero. Capacity is
-    /// unchanged; the mapping is reused.
+    /// Append the contents of `bytes`. Traps on overflow (see `append`).
+    /// Prefer `append(contentsOf: Span<UInt8>)`.
+    ///
+    /// - Precondition: `bytes` is valid for `bytes.count` bytes.
+    @unsafe
+    public func append(contentsOf bytes: UnsafeBufferPointer<UInt8>) {
+        append(contentsOf: unsafe Span(_unsafeElements: bytes))
+    }
+
+    /// Zero the whole logical capacity and reset `count` to zero. The
+    /// mapping is reused. The full capacity is wiped, not just `0..<count`,
+    /// so bytes written past `count` through `withUnsafeMutableBytes` do
+    /// not survive.
     public func reset() {
-        if _count > 0 {
-            secureZero(ptr, bytes: _count)
+        _count.withLock { count in
+            unsafe secureZero(UnsafeMutableBufferPointer(rebasing: region[0..<_capacity]))
+            count = 0
         }
-        _count = 0
+    }
+
+    // MARK: - Borrowed access
+
+    /// Borrow the valid prefix as a `Span` for the duration of `body`. The
+    /// span cannot escape the closure.
+    public func withSpan<R>(_ body: (Span<UInt8>) throws -> R) rethrows -> R {
+        let valid = count
+        let span = unsafe Span(_unsafeElements: UnsafeBufferPointer(rebasing: region[0..<valid]))
+        return try body(span)
     }
 
     // MARK: - Unsafe access
 
     /// Borrow the valid prefix as an immutable buffer pointer for the
     /// duration of `body`. Do not retain the pointer past the call.
+    /// Prefer `withSpan`.
+    @unsafe
     public func withUnsafeBytes<R>(
         _ body: (UnsafeBufferPointer<UInt8>) throws -> R
     ) rethrows -> R {
-        let typed = ptr.bindMemory(to: UInt8.self, capacity: _capacity)
-        let buf = UnsafeBufferPointer<UInt8>(start: typed, count: _count)
-        return try body(buf)
+        let valid = count
+        let buf = unsafe UnsafeBufferPointer(rebasing: region[0..<valid])
+        return try unsafe body(buf)
     }
 
     /// Borrow the *full* capacity as a mutable buffer pointer for the
     /// duration of `body`. The caller is responsible for not writing past
     /// `capacity`; `count` is not adjusted by this method.
+    @unsafe
     public func withUnsafeMutableBytes<R>(
         _ body: (UnsafeMutableBufferPointer<UInt8>) throws -> R
     ) rethrows -> R {
-        let typed = ptr.bindMemory(to: UInt8.self, capacity: _capacity)
-        let buf = UnsafeMutableBufferPointer<UInt8>(start: typed, count: _capacity)
-        return try body(buf)
+        let buf = unsafe UnsafeMutableBufferPointer(rebasing: region[0..<_capacity])
+        return try unsafe body(buf)
     }
 
     // MARK: - Debug
@@ -215,23 +226,33 @@ public final class SecureBytes: @unchecked Sendable {
     /// **not** conform to `CustomStringConvertible` — we don't want it
     /// appearing in `print`/`String(describing:)` by accident.
     public func debugDescription() -> String {
-        "SecureBytes(count: \(_count), capacity: \(_capacity), locked: \(wasLocked))"
+        "SecureBytes(count: \(count), capacity: \(_capacity), locked: \(wasLocked))"
     }
 
     #if DEBUG
-    /// Debug-only hook the test suite uses to verify that `deinit` actually
-    /// called `secureZero` before unmapping. Set to `true` immediately after
-    /// the wipe in `deinit`. **Never read or set this in non-test code.**
-    public nonisolated(unsafe) static var lastDeinitWasZeroed: Bool = false
-    /// Debug-only hook recording whether `munlock` succeeded in `deinit`.
-    /// `nil` if the buffer was never locked (best-effort `mlock` failure).
-    public nonisolated(unsafe) static var lastDeinitDidMunlock: Bool? = nil
-    /// Debug-only hook recording whether `munmap` succeeded in `deinit`.
-    public nonisolated(unsafe) static var lastDeinitDidMunmap: Bool = false
-    /// Debug-only hook recording the most recent value of `wasLocked` at
-    /// the moment the instance was deinit'd. Used by tests that don't keep
-    /// the instance alive long enough to query `debugDescription()`.
-    public nonisolated(unsafe) static var lastDeinitWasLocked: Bool = false
+    /// What the most recent `deinit` observed. Debug-only; the test suite
+    /// uses it to verify the wipe-unlock-unmap sequence, because the pages
+    /// cannot be inspected once they are unmapped. **Never read or set this
+    /// in non-test code.**
+    public struct DeinitProbe: Sendable, Equatable {
+        /// The first bytes of the mapping read back as zero after the wipe.
+        public var wasZeroed = false
+        /// `wasLocked` at the moment of deinit.
+        public var wasLocked = false
+        /// Whether `munlock` succeeded; `nil` if the buffer was never locked.
+        public var didMunlock: Bool?
+        /// Whether `munmap` succeeded.
+        public var didMunmap = false
+    }
+
+    private static let deinitProbe = Mutex(DeinitProbe())
+
+    /// The probe written by the most recent `deinit`. Assign a fresh
+    /// `DeinitProbe()` before a test to clear it.
+    public static var lastDeinit: DeinitProbe {
+        get { deinitProbe.withLock { $0 } }
+        set { deinitProbe.withLock { $0 = newValue } }
+    }
     #endif
 
     // MARK: - Cleanup
@@ -240,42 +261,28 @@ public final class SecureBytes: @unchecked Sendable {
         // Always wipe before unlocking/unmapping. `memset_s` cannot be
         // dead-store-eliminated even though `self` is going away. We wipe
         // the entire mapped region (not just `count`) so any residue from
-        // earlier appends or from the source buffer in `init(copying:)` is
-        // gone before the pages are returned to the kernel.
-        secureZero(ptr, bytes: mappedBytes)
+        // earlier appends is gone before the pages are returned to the
+        // kernel.
+        unsafe secureZero(region)
 
         #if DEBUG
-        // Verify the wipe happened by reading back a byte. If `memset_s`
-        // were optimised away (it shouldn't be), this would observe
-        // non-zero data. Probe up to 64 bytes.
-        var allZero = true
-        let probe = min(mappedBytes, 64)
-        for i in 0..<probe {
-            if ptr.load(fromByteOffset: i, as: UInt8.self) != 0 {
-                allZero = false
-                break
-            }
-        }
-        SecureBytes.lastDeinitWasZeroed = allZero
+        // Verify the wipe happened by reading back the first bytes. If
+        // `memset_s` were optimised away (it shouldn't be), this would
+        // observe non-zero data.
+        let wasZeroed = unsafe region.prefix(64).allSatisfy { $0 == 0 }
         #endif
 
-        #if DEBUG
-        SecureBytes.lastDeinitWasLocked = wasLocked
-        #endif
+        let didMunlock = unsafe wasLocked ? secureMunlock(region) : nil
+        let didMunmap = unsafe secureMunmap(region)
 
-        if wasLocked {
-            let unlocked = secureMunlock(ptr, bytes: mappedBytes)
-            #if DEBUG
-            SecureBytes.lastDeinitDidMunlock = unlocked
-            #endif
-        } else {
-            #if DEBUG
-            SecureBytes.lastDeinitDidMunlock = nil
-            #endif
-        }
-        let unmapped = secureMunmap(ptr, bytes: mappedBytes)
         #if DEBUG
-        SecureBytes.lastDeinitDidMunmap = unmapped
+        let probe = DeinitProbe(
+            wasZeroed: wasZeroed,
+            wasLocked: wasLocked,
+            didMunlock: didMunlock,
+            didMunmap: didMunmap
+        )
+        SecureBytes.lastDeinit = probe
         #endif
     }
 }

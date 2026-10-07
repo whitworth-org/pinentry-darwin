@@ -18,6 +18,22 @@ public struct ProcRunResult {
     public var didSucceed: Bool { exitCode == 0 }
 }
 
+/// Reads a pipe to EOF on a background queue so the child never blocks on a
+/// full pipe buffer (about 64 KiB) while the caller waits for it to exit.
+private final class PipeDrain: @unchecked Sendable {
+    // Written once on the drain queue and read only after `group.wait()`, which orders
+    // the two accesses.
+    private(set) var data = Data()
+
+    init(_ pipe: Pipe, group: DispatchGroup) {
+        group.enter()
+        DispatchQueue.global().async {
+            self.data = (try? pipe.fileHandleForReading.readToEnd()) ?? Data()
+            group.leave()
+        }
+    }
+}
+
 /// Run a binary synchronously and capture stdout/stderr. Throws if
 /// `Process.run()` itself fails (binary missing, EPERM, etc.).
 public func runProcess(
@@ -32,12 +48,14 @@ public func runProcess(
     proc.standardOutput = outPipe
     proc.standardError = errPipe
     try proc.run()
+    let group = DispatchGroup()
+    let out = PipeDrain(outPipe, group: group)
+    let err = PipeDrain(errPipe, group: group)
     proc.waitUntilExit()
-    let outData = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
-    let errData = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+    group.wait()
     return ProcRunResult(
         exitCode: proc.terminationStatus,
-        stdout: String(decoding: outData, as: UTF8.self),
-        stderr: String(decoding: errData, as: UTF8.self)
+        stdout: String(decoding: out.data, as: UTF8.self),
+        stderr: String(decoding: err.data, as: UTF8.self)
     )
 }

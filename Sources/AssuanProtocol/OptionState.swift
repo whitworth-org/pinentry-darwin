@@ -9,8 +9,7 @@
 // Unknown keys are silently ignored; that's the correct upstream behaviour
 // for forward-compat (gpg-agent may set new options we don't model yet).
 
-import Foundation
-import Darwin
+public import Foundation
 
 // MARK: - OptionState
 

@@ -8,12 +8,9 @@
 // All UI state lives on the main actor. The clients themselves are
 // actors that perform the subprocess I/O off-main.
 
+public import Combine
 import Foundation
 import os
-
-#if canImport(Combine)
-import Combine
-#endif
 
 private let log = Logger(
     subsystem: "org.whitworth.pinentry-darwin",
@@ -136,7 +133,7 @@ public final class SSHIdentityManager: ObservableObject {
         }
     }
 
-    private func formatError(_ error: Error) -> String {
+    private func formatError(_ error: any Error) -> String {
         switch error {
         case let SCAuthError.commandFailed(code, stderr):
             return "sc_auth exit \(code): \(stderr.trimmingCharacters(in: .whitespacesAndNewlines))"

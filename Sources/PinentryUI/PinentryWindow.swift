@@ -9,7 +9,7 @@
 // effect background) without copying any tab/fullscreen logic since our
 // windows are short-lived modal pinentry dialogs.
 
-import AppKit
+public import AppKit
 
 /// A small custom NSPanel that hosts pinentry dialogs.
 ///
@@ -26,23 +26,22 @@ import AppKit
 /// - Transparent titlebar that matches the underlying NSVisualEffectView.
 /// - No window title text (the SwiftUI body renders its own).
 /// - Floats above other apps while modal, but does not steal the dock.
-/// - Tracks the system Light/Dark appearance live (no `appearance` override).
+/// - Tracks the system Light/Dark appearance live unless the caller sets
+///   `appearance` for an explicit Light/Dark choice (see `makePinentryWindow`).
 @MainActor
 public final class PinentryWindow: NSPanel {
 
-    /// Lower bound. Below this the description column gets too narrow
-    /// for the smartcard-info multi-line content.
-    public static let minWidth: CGFloat = 680
+    /// Lower bound: pinentry-mac's width. The hero icon, description and
+    /// field row still lay out here; long descriptions wrap.
+    public static let minWidth: CGFloat = 480
 
     /// Upper bound. Above this the line measure for the description
     /// becomes too wide for comfortable reading even on 4K/5K hosts.
-    public static let maxWidth: CGFloat = 840
+    public static let maxWidth: CGFloat = 560
 
-    /// Fraction of the screen's visible width to occupy. 0.48 lands at
-    /// ~726pt on a 1512pt-wide 14" laptop and clamps to 840pt on
-    /// 4K/5K — landscape proportions, halfway between pinentry-mac's
-    /// original ~480pt and the doubled ~960pt.
-    private static let screenFraction: CGFloat = 0.48
+    /// Fraction of the screen's visible width to occupy: the minimum on
+    /// a laptop, growing to the maximum on large displays.
+    private static let screenFraction: CGFloat = 0.32
 
     /// Width of the next pinentry dialog, computed against the supplied
     /// screen (or `NSScreen.main`). Always lands in `[minWidth, maxWidth]`,
@@ -148,11 +147,6 @@ public final class PinentryWindow: NSPanel {
         //     authorization sheet posted by another component.
         becomesKeyOnlyIfNeeded = false
         worksWhenModal = true
-
-        // Do NOT set `appearance` — leaving it nil makes the window
-        // inherit `NSApp.effectiveAppearance` so System / Light / Dark
-        // changes propagate live. The Settings appearance override is
-        // applied at the SwiftUI hosting view level instead.
 
         // Background tint that adapts to system appearance. We do NOT
         // assign an NSVisualEffectView as contentView here: the caller

@@ -24,7 +24,7 @@
 // `SecureEnclaveWrap.unwrap` call so the user sees one prompt, not two.
 
 import Foundation
-import LocalAuthentication
+public import LocalAuthentication
 import os
 
 private let log = Logger(
@@ -145,12 +145,11 @@ public struct Authenticator: Sendable {
             guard !state else { return }
             state = true
             let context = LAContext()
-            var error: NSError?
-            let canBiometry = context.canEvaluatePolicy(
+            let canBiometry = unsafe context.canEvaluatePolicy(
                 .deviceOwnerAuthenticationWithBiometrics,
-                error: &error
+                error: nil
             )
-            let canPasscode = context.canEvaluatePolicy(
+            let canPasscode = unsafe context.canEvaluatePolicy(
                 .deviceOwnerAuthentication,
                 error: nil
             )

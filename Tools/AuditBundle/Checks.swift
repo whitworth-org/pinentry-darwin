@@ -14,6 +14,23 @@
 
 import Foundation
 
+// MARK: - Property lists
+
+/// Parse a property list from untrusted bytes.
+func parsePropertyList(_ data: Data) throws -> Any {
+    // `format: nil` is the only pointer argument and it is nil, so no memory is read or written
+    // through it.
+    try unsafe PropertyListSerialization.propertyList(from: data, format: nil)
+}
+
+/// True when `path` exists and is a directory, following symlinks.
+func directoryExists(atPath path: String) -> Bool {
+    var isDirectory: ObjCBool = false
+    // The out-parameter is a local that outlives the call; FileManager writes one byte to it.
+    let exists = unsafe FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+    return exists && isDirectory.boolValue
+}
+
 // MARK: - Bundle paths
 
 /// Resolved paths derived from the bundle root. Computed once per
@@ -151,7 +168,7 @@ public func checkInfoPlist(_ paths: BundlePaths, _ findings: inout Findings) {
     do {
         let url = URL(fileURLWithPath: paths.infoPlist)
         let data = try Data(contentsOf: url)
-        let raw = try PropertyListSerialization.propertyList(from: data, format: nil)
+        let raw = try parsePropertyList(data)
         guard let dict = raw as? [String: Any] else {
             findings.fail("Info.plist root is not a dictionary")
             return
@@ -300,14 +317,14 @@ func loadEntitlements(_ paths: BundlePaths) -> [String: Any]? {
         ["-d", "--entitlements", "-", "--xml", paths.bundle]
     ), embedded.didSucceed, !embedded.stdout.isEmpty,
        let data = embedded.stdout.data(using: .utf8),
-       let raw = try? PropertyListSerialization.propertyList(from: data, format: nil),
+       let raw = try? parsePropertyList(data),
        let dict = raw as? [String: Any] {
         return dict
     }
     // Fall back to repo source.
     let url = URL(fileURLWithPath: paths.entitlementsSrc)
     guard let data = try? Data(contentsOf: url),
-          let raw = try? PropertyListSerialization.propertyList(from: data, format: nil),
+          let raw = try? parsePropertyList(data),
           let dict = raw as? [String: Any] else {
         return nil
     }

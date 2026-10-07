@@ -31,8 +31,8 @@
 //     would otherwise replace lone high bytes with U+FFFD, losing data.
 //   * Lines are LF-terminated (0x0A); payload max 1000 bytes.
 
-import Foundation
-import SecureMemory
+public import Foundation
+public import SecureMemory
 
 // MARK: - LineCodec
 
@@ -45,6 +45,9 @@ public enum LineCodec {
         case invalidEscape
         case lineTooLong
         case invalidUtf8
+        /// The `SecureBytes` passed as the decode destination filled up
+        /// before the input was exhausted.
+        case destinationFull
     }
 
     // MARK: Escape
@@ -57,7 +60,7 @@ public enum LineCodec {
     /// `Swift.String`, which is regular non-locked, non-zeroed heap. Do
     /// **not** call this with secret bytes — use the `into:` variant
     /// below so the bytes flow directly into the wire-output buffer.
-    public static func escape(_ bytes: UnsafeBufferPointer<UInt8>) -> String {
+    public static func escape(_ bytes: Span<UInt8>) -> String {
         var out = Data()
         out.reserveCapacity(bytes.count * 3)
         escape(bytes, into: &out)
@@ -69,11 +72,11 @@ public enum LineCodec {
     /// wire-write target, so no intermediate `Swift.String` ever holds
     /// the escaped bytes. THIS is the variant secret callers must use.
     public static func escape(
-        _ bytes: UnsafeBufferPointer<UInt8>,
+        _ bytes: Span<UInt8>,
         into out: inout Data
     ) {
-        for b in bytes {
-            appendEscaped(byte: b, into: &out)
+        for i in bytes.indices {
+            appendEscaped(byte: bytes[i], into: &out)
         }
     }
 
@@ -97,12 +100,16 @@ public enum LineCodec {
     /// is used for command-argument decoding into a secure buffer; for
     /// `D`-line payloads use `unescapeFromDataLine(_:into:)` instead, which
     /// skips the `+`↔space substitution.
+    ///
+    /// - Throws: `DecodeError.destinationFull` if `out` runs out of capacity.
+    ///   Bytes decoded before that point stay in `out`; the caller owns
+    ///   wiping it.
     public static func unescape(_ s: Substring, into out: SecureBytes) throws {
         if s.utf8.count > maxLineLength {
             throw DecodeError.lineTooLong
         }
         try decodeBytes(s, plusIsSpace: true) { byte in
-            out.append(byte)
+            try appendChecked(byte, to: out)
         }
     }
 
@@ -120,7 +127,7 @@ public enum LineCodec {
     /// the returned `String` IS the secret in unwiped, non-locked
     /// Swift heap. Use the `into:` variant below for any secret
     /// payload; the production wire path uses it.
-    public static func escapeForDataLine(_ bytes: UnsafeBufferPointer<UInt8>) -> String {
+    public static func escapeForDataLine(_ bytes: Span<UInt8>) -> String {
         var out = Data()
         out.reserveCapacity(bytes.count * 3)
         escapeForDataLine(bytes, into: &out)
@@ -134,11 +141,11 @@ public enum LineCodec {
     /// variant the production `Response.encodeDataLine` uses for
     /// SecureBytes payloads.
     public static func escapeForDataLine(
-        _ bytes: UnsafeBufferPointer<UInt8>,
+        _ bytes: Span<UInt8>,
         into out: inout Data
     ) {
-        for b in bytes {
-            appendEscapedForDataLine(byte: b, into: &out)
+        for i in bytes.indices {
+            appendEscapedForDataLine(byte: bytes[i], into: &out)
         }
     }
 
@@ -159,16 +166,27 @@ public enum LineCodec {
 
     /// Like `unescapeFromDataLine` but routes bytes into a `SecureBytes`
     /// without ever copying through a `Swift.String` or `Array<UInt8>`.
+    ///
+    /// - Throws: `DecodeError.destinationFull` if `out` runs out of capacity.
     public static func unescapeFromDataLine(_ s: Substring, into out: SecureBytes) throws {
         if s.utf8.count > maxLineLength {
             throw DecodeError.lineTooLong
         }
         try decodeBytes(s, plusIsSpace: false) { byte in
-            out.append(byte)
+            try appendChecked(byte, to: out)
         }
     }
 
     // MARK: - Internal helpers
+
+    /// `SecureBytes.append` traps when full, which untrusted input must
+    /// never be able to trigger, so decoders check first and throw.
+    private static func appendChecked(_ byte: UInt8, to out: SecureBytes) throws {
+        guard out.count < out.capacity else {
+            throw DecodeError.destinationFull
+        }
+        out.append(byte)
+    }
 
     /// Append a single source byte to `out` in its escaped form.
     ///
@@ -231,28 +249,23 @@ public enum LineCodec {
         plusIsSpace: Bool = true,
         sink: (UInt8) throws -> Void
     ) throws {
-        let utf8 = Array(s.utf8)
-        var i = 0
-        while i < utf8.count {
-            let b = utf8[i]
-            if b == 0x25 { // '%'
-                guard i + 2 < utf8.count else {
-                    throw DecodeError.invalidEscape
-                }
+        // Walk the UTF-8 view in place: copying it into an `Array` first
+        // would leave an unwiped duplicate of any secret-bearing input.
+        var iterator = s.utf8.makeIterator()
+        while let b = iterator.next() {
+            switch b {
+            case 0x25: // '%'
                 guard
-                    let hi = hexValue(utf8[i + 1]),
-                    let lo = hexValue(utf8[i + 2])
+                    let hi = iterator.next().flatMap(hexValue),
+                    let lo = iterator.next().flatMap(hexValue)
                 else {
                     throw DecodeError.invalidEscape
                 }
                 try sink((hi << 4) | lo)
-                i += 3
-            } else if b == 0x2B { // '+'
+            case 0x2B: // '+'
                 try sink(plusIsSpace ? 0x20 : 0x2B)
-                i += 1
-            } else {
+            default:
                 try sink(b)
-                i += 1
             }
         }
     }

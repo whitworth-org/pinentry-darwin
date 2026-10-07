@@ -4,9 +4,10 @@
 // LineCodecTests — golden vectors and exhaustive byte-range round-trip
 // for the Assuan percent-escape / unescape routines.
 
+import Foundation
+import SecureMemory
 import XCTest
 @testable import AssuanProtocol
-import SecureMemory
 
 // MARK: - LineCodecTests
 
@@ -18,7 +19,7 @@ final class LineCodecTests: XCTestCase {
         // Every individual byte 0x00..0xFF must survive escape -> unescape.
         for v in 0...255 {
             let original: [UInt8] = [UInt8(v)]
-            let escaped = original.withUnsafeBufferPointer { LineCodec.escape($0) }
+            let escaped = LineCodec.escape(original.span)
             let decoded = try LineCodec.unescape(escaped)
             XCTAssertEqual(decoded, original, "byte 0x\(String(v, radix: 16)) failed round-trip")
         }
@@ -27,7 +28,7 @@ final class LineCodecTests: XCTestCase {
     func testAllBytesAtOnceRoundTrip() throws {
         // The entire 256-byte alphabet in a single buffer.
         let original: [UInt8] = (0...255).map { UInt8($0) }
-        let escaped = original.withUnsafeBufferPointer { LineCodec.escape($0) }
+        let escaped = LineCodec.escape(original.span)
         let decoded = try LineCodec.unescape(escaped)
         XCTAssertEqual(decoded, original)
     }
@@ -36,35 +37,35 @@ final class LineCodecTests: XCTestCase {
 
     func testGoldenSpaceToPlus() throws {
         let bytes = Array("hello world".utf8)
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escape($0) }
+        let escaped = LineCodec.escape(bytes.span)
         XCTAssertEqual(escaped, "hello+world")
         XCTAssertEqual(try LineCodec.unescape("hello+world"), bytes)
     }
 
     func testGoldenLiteralPercent() throws {
         let bytes = Array("a%b".utf8)
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escape($0) }
+        let escaped = LineCodec.escape(bytes.span)
         XCTAssertEqual(escaped, "a%25b")
         XCTAssertEqual(try LineCodec.unescape("a%25b"), bytes)
     }
 
     func testGoldenLiteralPlus() throws {
         let bytes = Array("a+b".utf8)
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escape($0) }
+        let escaped = LineCodec.escape(bytes.span)
         XCTAssertEqual(escaped, "a%2Bb")
         XCTAssertEqual(try LineCodec.unescape("a%2Bb"), bytes)
     }
 
     func testGoldenNewline() throws {
         let bytes: [UInt8] = [0x0A]
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escape($0) }
+        let escaped = LineCodec.escape(bytes.span)
         XCTAssertEqual(escaped, "%0A")
         XCTAssertEqual(try LineCodec.unescape("%0A"), bytes)
     }
 
     func testGoldenTab() throws {
         let bytes: [UInt8] = [0x09]
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escape($0) }
+        let escaped = LineCodec.escape(bytes.span)
         XCTAssertEqual(escaped, "%09")
         XCTAssertEqual(try LineCodec.unescape("%09"), bytes)
     }
@@ -117,9 +118,40 @@ final class LineCodecTests: XCTestCase {
         let secure = SecureBytes(capacity: 64)
         let input: Substring = "hello+world%21"[...]
         try LineCodec.unescape(input, into: secure)
-        secure.withUnsafeBytes { buf in
-            XCTAssertEqual(Array(buf), Array("hello world!".utf8))
+        XCTAssertEqual(contents(of: secure), Array("hello world!".utf8))
+    }
+
+    func testUnescapeFromDataLineIntoSecureBytesKeepsPlus() throws {
+        let secure = SecureBytes(capacity: 64)
+        try LineCodec.unescapeFromDataLine("a+b%20c"[...], into: secure)
+        XCTAssertEqual(contents(of: secure), Array("a+b c".utf8))
+    }
+
+    /// A hostile peer controls the escaped input, so a destination that is
+    /// too small must produce an error, not `SecureBytes`'s overflow trap.
+    func testUnescapeIntoTooSmallSecureBytesThrowsInsteadOfTrapping() {
+        let small = SecureBytes(capacity: 4)
+        XCTAssertThrowsError(try LineCodec.unescape("abcdefgh"[...], into: small)) { err in
+            XCTAssertEqual(err as? LineCodec.DecodeError, .destinationFull)
         }
+        XCTAssertEqual(small.count, 4, "bytes decoded before the overflow stay in place")
+
+        let smallData = SecureBytes(capacity: 2)
+        XCTAssertThrowsError(
+            try LineCodec.unescapeFromDataLine("%41%42%43"[...], into: smallData)
+        ) { err in
+            XCTAssertEqual(err as? LineCodec.DecodeError, .destinationFull)
+        }
+    }
+
+    func testUnescapeIntoSecureBytesAcceptsExactFit() throws {
+        let exact = SecureBytes(capacity: 3)
+        try LineCodec.unescape("%41%42%43"[...], into: exact)
+        XCTAssertEqual(contents(of: exact), [0x41, 0x42, 0x43])
+    }
+
+    private func contents(of secure: SecureBytes) -> [UInt8] {
+        secure.withSpan { span in (0..<span.count).map { span[$0] } }
     }
 
     // MARK: Data-line encoding (no '+' ↔ space)
@@ -129,32 +161,32 @@ final class LineCodecTests: XCTestCase {
     // (space → '+') would corrupt any space-bearing passphrase.
     func testDataLineSpacePassesThrough() {
         let bytes = Array("hello world".utf8)
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        let escaped = LineCodec.escapeForDataLine(bytes.span)
         XCTAssertEqual(escaped, "hello world")
     }
 
     func testDataLinePlusEscaped() {
         let bytes = Array("a+b".utf8)
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        let escaped = LineCodec.escapeForDataLine(bytes.span)
         XCTAssertEqual(escaped, "a%2Bb",
                        "literal '+' must be %HH-escaped on D lines so a peer using either decoder reads it back as '+'")
     }
 
     func testDataLinePercentEscaped() {
         let bytes = Array("100%".utf8)
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        let escaped = LineCodec.escapeForDataLine(bytes.span)
         XCTAssertEqual(escaped, "100%25")
     }
 
     func testDataLineControlBytesEscaped() {
         let bytes: [UInt8] = [0x09, 0x0A, 0x0D, 0x1F]
-        let escaped = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        let escaped = LineCodec.escapeForDataLine(bytes.span)
         XCTAssertEqual(escaped, "%09%0A%0D%1F")
     }
 
     func testDataLineRoundTripWithSpaces() throws {
         let original = Array("password with multiple spaces".utf8)
-        let escaped = original.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        let escaped = LineCodec.escapeForDataLine(original.span)
         XCTAssertEqual(escaped, "password with multiple spaces")
         let decoded = try LineCodec.unescapeFromDataLine(escaped)
         XCTAssertEqual(decoded, original)
@@ -171,7 +203,7 @@ final class LineCodecTests: XCTestCase {
     func testDataLineAllByteValuesRoundTrip() throws {
         for v in 0...255 {
             let original: [UInt8] = [UInt8(v)]
-            let escaped = original.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+            let escaped = LineCodec.escapeForDataLine(original.span)
             let decoded = try LineCodec.unescapeFromDataLine(escaped)
             XCTAssertEqual(decoded, original, "byte 0x\(String(v, radix: 16)) failed D-line round-trip")
         }
@@ -188,9 +220,9 @@ final class LineCodecTests: XCTestCase {
     func testEscapeIntoDataMatchesStringForm() {
         let bytes = Array("hello world+%\u{0009}".utf8)
         var out = Data()
-        bytes.withUnsafeBufferPointer { LineCodec.escape($0, into: &out) }
+        LineCodec.escape(bytes.span, into: &out)
         let asString = String(decoding: out, as: UTF8.self)
-        let stringForm = bytes.withUnsafeBufferPointer { LineCodec.escape($0) }
+        let stringForm = LineCodec.escape(bytes.span)
         XCTAssertEqual(asString, stringForm,
                        "byte-output and String-output variants must produce identical bytes")
     }
@@ -198,9 +230,9 @@ final class LineCodecTests: XCTestCase {
     func testEscapeForDataLineIntoDataMatchesStringForm() {
         let bytes = Array("password with + and % and \u{0007}".utf8)
         var out = Data()
-        bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0, into: &out) }
+        LineCodec.escapeForDataLine(bytes.span, into: &out)
         let asString = String(decoding: out, as: UTF8.self)
-        let stringForm = bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0) }
+        let stringForm = LineCodec.escapeForDataLine(bytes.span)
         XCTAssertEqual(asString, stringForm)
     }
 
@@ -211,7 +243,7 @@ final class LineCodecTests: XCTestCase {
         var out = Data()
         out.append(contentsOf: "D ".utf8)
         let bytes = Array("hi".utf8)
-        bytes.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0, into: &out) }
+        LineCodec.escapeForDataLine(bytes.span, into: &out)
         out.append(0x0A)
         XCTAssertEqual(String(decoding: out, as: UTF8.self), "D hi\n")
     }
@@ -223,7 +255,7 @@ final class LineCodecTests: XCTestCase {
         for v in 0...255 {
             let original: [UInt8] = [UInt8(v)]
             var out = Data()
-            original.withUnsafeBufferPointer { LineCodec.escapeForDataLine($0, into: &out) }
+            LineCodec.escapeForDataLine(original.span, into: &out)
             let decoded = try LineCodec.unescapeFromDataLine(String(decoding: out, as: UTF8.self))
             XCTAssertEqual(decoded, original, "byte 0x\(String(v, radix: 16)) failed byte-output round-trip")
         }

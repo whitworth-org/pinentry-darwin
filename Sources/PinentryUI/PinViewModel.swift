@@ -29,9 +29,9 @@
 // remains in AssuanProtocol for future consumers; we just don't call it.
 
 import Foundation
-import Observation
+public import Observation
 import KeychainStore
-import SecureMemory
+public import SecureMemory
 
 @MainActor
 @Observable
@@ -57,6 +57,12 @@ public final class PinViewModel {
 
     /// Mismatch flag, recomputed on every change.
     public var pinsMatch: Bool = true
+
+    /// True when the typed value did not fit in `pin` / `repeatPin` and was
+    /// cut short. Submitting a silently truncated passphrase would send the
+    /// wrong secret to gpg-agent, so `canSubmit` stays false while set.
+    public private(set) var pinTruncated: Bool = false
+    public private(set) var repeatTruncated: Bool = false
 
     /// Whether the spec asked for a repeat-passphrase confirmation. When
     /// false, `pinsMatch` is held true regardless of the repeat buffer
@@ -106,15 +112,16 @@ public final class PinViewModel {
     // MARK: - Input
 
     /// Replace the contents of `pin` with the UTF-8 bytes of `value`.
-    /// Truncates if the value would exceed the buffer capacity.
+    /// Truncates if the value would exceed the buffer capacity and sets
+    /// `pinTruncated` so the dialog refuses to submit the cut-short value.
     public func setPin(from value: String) {
-        Self.copy(string: value, into: pin)
+        pinTruncated = Self.copy(string: value, into: pin)
         pinLength = pin.count
         recomputeMatch()
     }
 
     public func setRepeat(from value: String) {
-        Self.copy(string: value, into: repeatPin)
+        repeatTruncated = Self.copy(string: value, into: repeatPin)
         repeatLength = repeatPin.count
         recomputeMatch()
     }
@@ -131,31 +138,19 @@ public final class PinViewModel {
     /// wipe the never-egressed `repeatPin` here since nothing downstream
     /// reads it.
     public func submit() {
-        guard !isSubmitting else { return }
+        guard canSubmit, !isSubmitting else { return }
         isSubmitting = true
         repeatPin.reset()
         deliver(.pin(pin, savedToKeychain: saveToKeychain))
     }
 
-    public func cancel() {
-        wipe()
-        deliver(.canceled)
-    }
+    public func cancel() { finish(.canceled) }
 
-    public func notConfirmed() {
-        wipe()
-        deliver(.notConfirmed)
-    }
+    public func notConfirmed() { finish(.notConfirmed) }
 
-    public func windowClosed() {
-        wipe()
-        deliver(.windowClosed)
-    }
+    public func windowClosed() { finish(.windowClosed) }
 
-    public func timedOut() {
-        wipe()
-        deliver(.timedOut)
-    }
+    public func timedOut() { finish(.timedOut) }
 
     /// Deterministically zero both passphrase buffers. Called on every
     /// non-egress terminal path (cancel / close / timeout). On the submit
@@ -166,16 +161,26 @@ public final class PinViewModel {
         repeatPin.reset()
     }
 
+    /// Wipe and deliver a non-egress result. Does nothing once a result has
+    /// been delivered: after `submit()` the egress `pin` belongs to the
+    /// consumer, and a late cancel must not zero it.
+    private func finish(_ result: DialogResult) {
+        guard onResult != nil else { return }
+        wipe()
+        deliver(result)
+    }
+
     private func deliver(_ result: DialogResult) {
         guard let cb = onResult else { return }
         onResult = nil
         cb(result)
     }
 
-    /// True when OK should be enabled: at least one byte typed, and (if a
-    /// repeat field is shown) the two buffers match byte-for-byte.
+    /// True when OK should be enabled: at least one byte typed, nothing
+    /// truncated, and (if a repeat field is shown) the two buffers match
+    /// byte-for-byte.
     public var canSubmit: Bool {
-        pin.count > 0 && pinsMatch
+        pin.count > 0 && pinsMatch && !pinTruncated && !repeatTruncated
     }
 
     // MARK: - Private helpers
@@ -195,11 +200,12 @@ public final class PinViewModel {
             pinsMatch = false
             return
         }
+        // Accumulate the XOR of every byte pair so the comparison does not
+        // exit early on the first difference.
         var equal: UInt8 = 0
-        pin.withUnsafeBytes { a in
-            repeatPin.withUnsafeBytes { b in
-                let n = a.count
-                for i in 0..<n {
+        pin.withSpan { a in
+            repeatPin.withSpan { b in
+                for i in 0..<Swift.min(a.count, b.count) {
                     equal |= a[i] ^ b[i]
                 }
             }
@@ -207,7 +213,8 @@ public final class PinViewModel {
         pinsMatch = (equal == 0)
     }
 
-    private static func copy(string value: String, into buffer: SecureBytes) {
+    /// Returns true when `value` was longer than the buffer and got cut.
+    private static func copy(string value: String, into buffer: SecureBytes) -> Bool {
         // Walk `value.utf8` directly into the SecureBytes. The previous
         // `Array(value.utf8)` materialised the bytes in regular Swift
         // heap (Array<UInt8> has no deinit-zero) — a second unwiped
@@ -219,10 +226,11 @@ public final class PinViewModel {
         let cap = buffer.capacity
         var written = 0
         for byte in value.utf8 {
-            if written >= cap { break }
+            if written >= cap { return true }
             buffer.append(byte)
             written += 1
         }
+        return false
     }
 }
 

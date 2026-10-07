@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Ryan Whitworth.
 //
-// PinentryUIPrefs.swift — UI-only settings (theme override, titlebar
-// style, default timeout, etc.) persisted to our own UserDefaults suite
+// PinentryUIPrefs.swift — UI-only settings (theme override, default
+// timeout, input hardening toggles) persisted to our own UserDefaults suite
 // `org.whitworth.pinentry-darwin` under the key `UISettings` as a JSON
 // blob. Keychain-related toggles live in `KeychainStore.UserPrefs`.
 //
@@ -10,7 +10,7 @@
 // Keeping them split avoids name collisions across modules and lets each
 // store own its persistence.
 
-import Foundation
+public import Foundation
 
 // MARK: - UISettings
 
@@ -20,16 +20,10 @@ public struct UISettings: Sendable, Codable, Equatable {
         case system, light, dark
     }
 
-    public enum TitlebarStyle: String, CaseIterable, Sendable, Codable {
-        case transparent, hidden, standard
-    }
-
     public var theme: Theme = .system
-    public var titlebarStyle: TitlebarStyle = .transparent
-    /// 0 disables the timeout entirely. Range 0…600 in the UI.
+    /// Seconds before a dialog gives up when gpg-agent sent no SETTIMEOUT.
+    /// 0 disables the fallback. Range 0…600 in the UI.
     public var defaultTimeout: Int = 0
-    public var closeOnBlur: Bool = false
-    public var beepOnWeakPassphrase: Bool = false
     /// Enable Carbon's `EnableSecureEventInput` for the GETPIN dialog so
     /// other processes cannot observe keystrokes during passphrase
     /// entry. Default ON: pinentry-darwin's modal exists *only* to
@@ -45,18 +39,12 @@ public struct UISettings: Sendable, Codable, Equatable {
 
     public init(
         theme: Theme = .system,
-        titlebarStyle: TitlebarStyle = .transparent,
         defaultTimeout: Int = 0,
-        closeOnBlur: Bool = false,
-        beepOnWeakPassphrase: Bool = false,
         secureKeyboardEntry: Bool = true,
         clearPasteboardOnSubmit: Bool = true
     ) {
         self.theme = theme
-        self.titlebarStyle = titlebarStyle
         self.defaultTimeout = defaultTimeout
-        self.closeOnBlur = closeOnBlur
-        self.beepOnWeakPassphrase = beepOnWeakPassphrase
         self.secureKeyboardEntry = secureKeyboardEntry
         self.clearPasteboardOnSubmit = clearPasteboardOnSubmit
     }

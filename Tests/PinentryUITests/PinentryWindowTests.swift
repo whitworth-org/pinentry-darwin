@@ -124,4 +124,11 @@ final class PinentryWindowTests: XCTestCase {
         win.close()
         XCTAssertEqual(fired, 0, "resolver-driven close must bypass onCloseRequested")
     }
+
+    func testPreferredWidthStaysWithinBoundsAndIsEven() {
+        let width = PinentryWindow.preferredWidth()
+        XCTAssertGreaterThanOrEqual(width, PinentryWindow.minWidth)
+        XCTAssertLessThanOrEqual(width, PinentryWindow.maxWidth)
+        XCTAssertEqual(Int(width) % 2, 0, "even widths land on whole pixels at @2x")
+    }
 }

@@ -32,7 +32,6 @@
 //     dialog. Defensive disable on resolve is still cheaper than a
 //     stuck lock badge.
 
-import AppKit
 import Carbon.HIToolbox
 
 @MainActor

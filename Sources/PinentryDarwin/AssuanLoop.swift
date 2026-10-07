@@ -20,9 +20,7 @@
 //     text. Wire response is a generic ERR.
 
 import Foundation
-import LocalAuthentication
 import os
-import AppKit
 import AssuanProtocol
 import KeychainStore
 import PinentryUI
@@ -135,6 +133,10 @@ final class AssuanLoop {
     private var clearPassphraseCount = 0
     private static let maxClearPassphrasePerSession = 64
 
+    /// Bound on back-to-back unparseable lines before the session is
+    /// dropped. Real agents send none; a few tolerates a stray bad line.
+    private static let maxConsecutiveMalformedLines = 8
+
     // MARK: Init
 
     init(
@@ -163,15 +165,26 @@ final class AssuanLoop {
             return
         }
 
+        var consecutiveMalformed = 0
         while true {
             let cmd: Command
             do {
                 cmd = try await session.nextCommand()
+                consecutiveMalformed = 0
             } catch SessionError.malformedLine {
                 // AS-4: malformed input is per-command per the Assuan spec;
                 // an ERR reply must NOT tear down the session. The body is
                 // intentionally generic (no echo of the offending bytes —
                 // that would re-introduce the M8 hardening regression).
+                //
+                // The cap exists because a line the session cannot consume
+                // (e.g. invalid UTF-8) is reported again on every read; an
+                // unbounded `continue` would spin and flood the peer.
+                consecutiveMalformed += 1
+                if consecutiveMalformed > Self.maxConsecutiveMalformedLines {
+                    log.error("too many consecutive malformed lines; aborting loop")
+                    return
+                }
                 _ = try? await sendErr(code: AssuanError.general,
                                        message: "Malformed command")
                 continue
@@ -185,117 +198,115 @@ final class AssuanLoop {
                 return
             }
 
-            switch cmd {
-            case .bye:
-                _ = try? await session.send(.ok)
-                return
-
-            case .reset:
-                dialog.resetAll()
-                optionState.resetPerOperation()
-                triedKeychainThisSession = false
-                await reply(.ok)
-
-            case .option(let key, let value):
-                optionState.apply(key: key, value: value)
-                await reply(.ok)
-
-            case .setDesc(let s):
-                // FV-6: SETDESC text reaches the SwiftUI body in PinView /
-                // ConfirmView / MessageView via Text(verbatim:), and the
-                // Touch ID sheet via Authenticator.sanitize. Strip bidi /
-                // zero-width / BOM codepoints at ingest so the same payload
-                // is consistent across both surfaces.
-                dialog.description = Mnemonic.sanitiseBody(s)
-                await reply(.ok)
-            case .setPrompt(let s):
-                dialog.prompt = Mnemonic.strip(s)
-                await reply(.ok)
-            case .setTitle(let s):
-                // FV-6: title renders via Text(verbatim:) on every dialog.
-                dialog.title = Mnemonic.sanitiseBody(s)
-                await reply(.ok)
-            case .setError(let s):
-                // FV-6: error string renders via Text(verbatim:) above the
-                // input field — a prime phishing target.
-                dialog.error = Mnemonic.sanitiseBody(s)
-                await reply(.ok)
-            case .setOK(let s):
-                dialog.okLabel = Mnemonic.strip(s)
-                await reply(.ok)
-            case .setNotOK(let s):
-                dialog.notOKLabel = Mnemonic.strip(s)
-                await reply(.ok)
-            case .setCancel(let s):
-                dialog.cancelLabel = Mnemonic.strip(s)
-                await reply(.ok)
-
-            case .setKeyInfo(let ki):
-                switch ki {
-                case .clear:
-                    dialog.keyInfo = nil
-                case .key:
-                    dialog.keyInfo = ki
-                }
-                await reply(.ok)
-
-            case .setRepeat(let s):
-                dialog.repeatPrompt = Mnemonic.strip(s)
-                await reply(.ok)
-            case .setRepeatOK(let s):
-                dialog.repeatOK = Mnemonic.strip(s)
-                await reply(.ok)
-            case .setRepeatError(let s):
-                // FV-6: repeat-mismatch error renders via Text(verbatim:).
-                dialog.repeatError = Mnemonic.sanitiseBody(s)
-                await reply(.ok)
-
-            case .setTimeout(let n):
-                dialog.timeoutSeconds = n
-                await reply(.ok)
-
-            case .setQualityBar(let label):
-                dialog.qualityBar = label.map(Mnemonic.strip) ?? ""
-                await reply(.ok)
-            case .setQualityBarTT(let s):
-                dialog.qualityBarTooltip = s
-                await reply(.ok)
-
-            case .setGenpinLabel(let s):
-                // Stub: stored for future v1.1 generation UI.
-                dialog.genpinLabel = s
-                await reply(.ok)
-            case .setGenpinTT(let s):
-                dialog.genpinTooltip = s
-                await reply(.ok)
-
-            case .getPin:
-                await handleGetPin()
-
-            case .confirm(let oneButton):
-                await handleConfirm(oneButton: oneButton)
-
-            case .message:
-                await handleMessage()
-
-            case .getInfo(let topic):
-                await handleGetInfo(topic)
-
-            case .clearPassphrase(let keyInfo):
-                handleClearPassphrase(keyInfo)
-                await reply(.ok)
-
-            case .unknown:
-                // Don't echo the verb back: the parser already strips
-                // LF (Session.readLine) but the verb can still carry
-                // NUL/BEL/ESC and arbitrary UTF-8 bytes that survived
-                // String validation. A constant body keeps log
-                // consumers safe and removes a small reconnaissance
-                // gadget for hostile parents.
-                await reply(.err(code: AssuanError.general,
-                                 message: "Unknown command"))
-            }
+            if await !dispatch(cmd) { return }
         }
+    }
+
+    /// Execute one command. Returns false when the session is over (BYE).
+    private func dispatch(_ cmd: Command) async -> Bool {
+        if await applySetting(cmd) { return true }
+
+        switch cmd {
+        case .bye:
+            _ = try? await session.send(.ok)
+            return false
+
+        case .reset:
+            dialog.resetAll()
+            optionState.resetPerOperation()
+            triedKeychainThisSession = false
+            await reply(.ok)
+
+        case .option(let key, let value):
+            optionState.apply(key: key, value: value)
+            await reply(.ok)
+
+        case .getPin:
+            await handleGetPin()
+
+        case .confirm(let oneButton):
+            await handleConfirm(oneButton: oneButton)
+
+        case .message:
+            await handleMessage()
+
+        case .getInfo(let topic):
+            await handleGetInfo(topic)
+
+        case .clearPassphrase(let keyInfo):
+            handleClearPassphrase(keyInfo)
+            await reply(.ok)
+
+        default:
+            // `.unknown`, and any command no handler above claims.
+            // Don't echo the verb back: the parser already strips
+            // LF (Session.readLine) but the verb can still carry
+            // NUL/BEL/ESC and arbitrary UTF-8 bytes that survived
+            // String validation. A constant body keeps log
+            // consumers safe and removes a small reconnaissance
+            // gadget for hostile parents.
+            await reply(.err(code: AssuanError.general,
+                             message: "Unknown command"))
+        }
+        return true
+    }
+
+    /// Apply a SET* command to `dialog` and acknowledge it. Returns false
+    /// (without replying) when `cmd` is not a SET* command.
+    private func applySetting(_ cmd: Command) async -> Bool {
+        switch cmd {
+        case .setDesc(let s):
+            // FV-6: SETDESC text reaches the SwiftUI body in PinView /
+            // ConfirmView / MessageView via Text(verbatim:), and the
+            // Touch ID sheet via Authenticator.sanitize. Strip bidi /
+            // zero-width / BOM codepoints at ingest so the same payload
+            // is consistent across both surfaces.
+            dialog.description = Mnemonic.sanitiseBody(s)
+        case .setPrompt(let s):
+            dialog.prompt = Mnemonic.strip(s)
+        case .setTitle(let s):
+            // FV-6: title renders via Text(verbatim:) on every dialog.
+            dialog.title = Mnemonic.sanitiseBody(s)
+        case .setError(let s):
+            // FV-6: error string renders via Text(verbatim:) above the
+            // input field — a prime phishing target.
+            dialog.error = Mnemonic.sanitiseBody(s)
+        case .setOK(let s):
+            dialog.okLabel = Mnemonic.strip(s)
+        case .setNotOK(let s):
+            dialog.notOKLabel = Mnemonic.strip(s)
+        case .setCancel(let s):
+            dialog.cancelLabel = Mnemonic.strip(s)
+        case .setKeyInfo(let ki):
+            switch ki {
+            case .clear:
+                dialog.keyInfo = nil
+            case .key:
+                dialog.keyInfo = ki
+            }
+        case .setRepeat(let s):
+            dialog.repeatPrompt = Mnemonic.strip(s)
+        case .setRepeatOK(let s):
+            dialog.repeatOK = Mnemonic.strip(s)
+        case .setRepeatError(let s):
+            // FV-6: repeat-mismatch error renders via Text(verbatim:).
+            dialog.repeatError = Mnemonic.sanitiseBody(s)
+        case .setTimeout(let n):
+            dialog.timeoutSeconds = n
+        case .setQualityBar(let label):
+            dialog.qualityBar = label.map(Mnemonic.strip) ?? ""
+        case .setQualityBarTT(let s):
+            dialog.qualityBarTooltip = s
+        case .setGenpinLabel(let s):
+            // Stub: stored for future v1.1 generation UI.
+            dialog.genpinLabel = s
+        case .setGenpinTT(let s):
+            dialog.genpinTooltip = s
+        default:
+            return false
+        }
+        await reply(.ok)
+        return true
     }
 
     // MARK: GETPIN

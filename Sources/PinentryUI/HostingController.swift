@@ -6,22 +6,27 @@
 // resulting window is sized to fit its SwiftUI content (height) at the
 // fixed preferred width.
 
-import AppKit
-import SwiftUI
+public import AppKit
+public import SwiftUI
 
 /// Build a `PinentryWindow` that hosts the supplied SwiftUI view.
 ///
 /// - Parameters:
-///   - rootView: the SwiftUI view to embed. Theme-override modifiers
-///     should already be applied by the caller (so `.preferredColorScheme`
-///     is *only* set for explicit Light/Dark, never for System).
+///   - rootView: the SwiftUI view to embed.
 ///   - title: optional accessibility title (`title` is hidden visually but
 ///     is still announced to VoiceOver and shown in window-menu lists).
+///   - theme: the Light/Dark/System choice. Applied as the window's
+///     `appearance`, which SwiftUI content and AppKit controls both follow;
+///     System leaves it `nil` so the window tracks System Settings live.
 ///
 /// - Returns: a configured but **not yet visible** `PinentryWindow`.
 ///   The caller is responsible for `makeKeyAndOrderFront` + `center`.
 @MainActor
-public func makePinentryWindow<V: View>(rootView: V, title: String?) -> NSWindow {
+public func makePinentryWindow<V: View>(
+    rootView: V,
+    title: String?,
+    theme: UISettings.Theme
+) -> NSWindow {
     // Compute the dialog width once against the active screen so the
     // dialog scales with display density. 4K/5K hosts get more breathing
     // room; laptop screens stay compact.
@@ -40,6 +45,7 @@ public func makePinentryWindow<V: View>(rootView: V, title: String?) -> NSWindow
     )
     let window = PinentryWindow(contentRect: initialRect)
     if let title { window.title = title }
+    window.appearance = theme.appearance
 
     let constrained = rootView.frame(width: preferredWidth)
     let hosting = NSHostingController(rootView: constrained)

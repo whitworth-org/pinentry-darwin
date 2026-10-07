@@ -40,8 +40,8 @@
 //     `EnableSecureEventInput`) already does that for the dialog's
 //     lifetime and is the right layer for that control.
 
-import AppKit
-import SwiftUI
+public import AppKit
+public import SwiftUI
 
 // MARK: - SwiftUI wrappers
 
@@ -78,7 +78,9 @@ public struct HardenedSecureField: NSViewRepresentable {
             // Defer to the next runloop tick so the window has had a
             // chance to install us before we ask to become key.
             DispatchQueue.main.async { [weak field] in
-                field?.window?.makeFirstResponder(field)
+                // `window` is an unretained AppKit reference; it is used on the main
+                // thread within this tick while the field is held alive by `field`.
+                unsafe field?.window?.makeFirstResponder(field)
             }
         }
         return field
@@ -127,7 +129,9 @@ public struct HardenedTextField: NSViewRepresentable {
         field.stringValue = text
         if becomesFirstResponderOnAppear {
             DispatchQueue.main.async { [weak field] in
-                field?.window?.makeFirstResponder(field)
+                // `window` is an unretained AppKit reference; it is used on the main
+                // thread within this tick while the field is held alive by `field`.
+                unsafe field?.window?.makeFirstResponder(field)
             }
         }
         return field

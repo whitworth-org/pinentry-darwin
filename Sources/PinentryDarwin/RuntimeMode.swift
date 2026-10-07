@@ -18,6 +18,8 @@ enum RuntimeMode: Equatable {
     case daemon
     /// `--preferences`: open the SwiftUI Settings window as a foreground app.
     case preferences
+    /// `--configure-gpg-agent`: set `pinentry-program` in gpg-agent.conf and exit.
+    case configureGPGAgent
     /// `--version` / `-V`: print version and exit 0.
     case version
     /// `--help` / `-h`: print one-line usage and exit 0.
@@ -45,6 +47,9 @@ func parseArgs(_ argv: [String]) -> RuntimeMode {
         }
         if arg == "--help" || arg == "-h" {
             return .help
+        }
+        if arg == "--configure-gpg-agent" {
+            return .configureGPGAgent
         }
         if arg == "--preferences" {
             mode = .preferences
@@ -136,23 +141,18 @@ func resolvedVersion() -> String {
 /// Usage banner printed by `--help`.
 func helpText() -> String {
     """
-    usage: pinentry-darwin [--version] [--help] [--preferences]
+    usage: pinentry-darwin [--version] [--help] [--preferences] [--configure-gpg-agent]
 
-    pinentry-darwin is a Swift 6 / SwiftUI replacement for pinentry-mac.
-    Drop-in passphrase dialog for gpg-agent on macOS.
+    Passphrase dialog for gpg-agent on macOS.
 
     Modes:
-      (default)        Speak Assuan over stdin/stdout. Invoked by gpg-agent.
-      --preferences    Open the Settings window as a foreground app.
-      --version, -V    Print the version string and exit.
-      --help, -h       Print this message and exit.
-
-    Configure gpg-agent to use this binary by adding the following line
-    to ~/.gnupg/gpg-agent.conf and running `gpgconf --kill gpg-agent`:
-
-      pinentry-program /opt/homebrew/bin/pinentry-darwin
-
-    See https://github.com/whitworth/pinentry-darwin for full docs.
+      (default)               Speak Assuan over stdin/stdout. Invoked by gpg-agent.
+      --preferences           Open the Settings window.
+      --configure-gpg-agent   Set pinentry-program in gpg-agent.conf ($GNUPGHOME or
+                              ~/.gnupg) to this executable, then restart the agent
+                              with: gpgconf --kill gpg-agent
+      --version, -V           Print the version and exit.
+      --help, -h              Print this message and exit.
 
     """
 }

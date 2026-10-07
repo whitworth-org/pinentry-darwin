@@ -150,6 +150,24 @@ final class PasteboardGuardTests: XCTestCase {
                        "must not wipe a clipboard untouched during the dialog")
     }
 
+    // MARK: missing baseline
+
+    // PinView initialises its baseline to -1 until onAppear snapshots the
+    // pasteboard. Without a real baseline every changeCount compares as
+    // "advanced", so the guard must refuse to clear.
+    func testNegativeBaselineNeverClears() {
+        pasteboard.clearContents()
+        pasteboard.setString("user-copied-earlier", forType: .string)
+
+        let cleared = PasteboardGuard.clearIfAdvanced(
+            since: -1,
+            enabled: true,
+            on: pasteboard
+        )
+        XCTAssertFalse(cleared, "no baseline snapshot => must not clear")
+        XCTAssertEqual(pasteboard.string(forType: .string), "user-copied-earlier")
+    }
+
     // MARK: idempotency
 
     func testClearIfAdvancedIsIdempotent() {

@@ -3,13 +3,12 @@
 //
 // AppearanceSettingsView.swift — Settings → Appearance tab.
 //
-// IMPORTANT: the theme override is applied at present-time (via
-// `Coordinator.applyTheme`) only when the user picks a non-system value.
-// We never call `.preferredColorScheme()` on a view whose theme is
-// `.system`; that would short-circuit live `NSApp.effectiveAppearance`.
+// The theme override is applied to the hosting NSWindow/NSApplication
+// (`UISettings.Theme.appearance`), never through SwiftUI, so AppKit chrome
+// and controls follow it too. `.system` is nil: nothing is overridden.
 
-import SwiftUI
-import KeychainStore
+public import SwiftUI
+public import KeychainStore
 
 public struct AppearanceSettingsView: View {
     @Binding public var settings: UISettings
@@ -38,15 +37,6 @@ public struct AppearanceSettingsView: View {
                 .onChange(of: settings.theme) { _, _ in onChange(settings) }
             }
 
-            Section("Window") {
-                Picker("Titlebar style", selection: $settings.titlebarStyle) {
-                    Text("Transparent").tag(UISettings.TitlebarStyle.transparent)
-                    Text("Hidden").tag(UISettings.TitlebarStyle.hidden)
-                    Text("Standard").tag(UISettings.TitlebarStyle.standard)
-                }
-                .onChange(of: settings.titlebarStyle) { _, _ in onChange(settings) }
-            }
-
             Section("Input") {
                 Toggle("Show typing by default", isOn: Binding(
                     get: { keychainPrefs.showTypingByDefault },
@@ -63,11 +53,6 @@ public struct AppearanceSettingsView: View {
                     }
                 ))
             }
-
-            Text("Theme changes apply to the next dialog.")
-                .font(Theme.captionFont)
-                .foregroundStyle(Color.secondary)
         }
-        .padding(Theme.mediumPadding)
     }
 }

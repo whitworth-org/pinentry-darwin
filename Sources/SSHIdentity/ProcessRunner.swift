@@ -7,7 +7,7 @@
 // shell, no string interpolation — so the only thing this helper has
 // to provide is launch + capture + exit-code, with a typed result.
 
-import Foundation
+public import Foundation
 import os
 
 private let log = Logger(
@@ -73,9 +73,9 @@ public struct RealProcessRunner: ProcessRunner {
     /// timeout closure exactly once and then dropped.
     private final class ResumeGuard: @unchecked Sendable {
         private let didResume = OSAllocatedUnfairLock<Bool>(initialState: false)
-        private var cont: CheckedContinuation<ProcessResult, Error>?
+        private var cont: CheckedContinuation<ProcessResult, any Error>?
 
-        init(_ cont: CheckedContinuation<ProcessResult, Error>) {
+        init(_ cont: CheckedContinuation<ProcessResult, any Error>) {
             self.cont = cont
         }
 
@@ -97,7 +97,7 @@ public struct RealProcessRunner: ProcessRunner {
             c?.resume(returning: value)
         }
 
-        func resume(throwing error: Error) {
+        func resume(throwing error: any Error) {
             guard claim() else { return }
             let c = cont
             cont = nil
@@ -115,6 +115,40 @@ public struct RealProcessRunner: ProcessRunner {
             state.withLock { proc in
                 if let proc, proc.isRunning { proc.terminate() }
             }
+        }
+    }
+
+    /// Per-stream capture ceiling. The child is always drained to EOF so it cannot block on a
+    /// full pipe, but bytes beyond this are dropped so a runaway child cannot exhaust memory.
+    static let maxCapturedBytes = 1 << 20
+
+    /// Accumulates child output up to `maxCapturedBytes`.
+    private struct CappedData {
+        private(set) var data = Data()
+        private(set) var wasTruncated = false
+
+        mutating func append(_ chunk: Data) {
+            let room = RealProcessRunner.maxCapturedBytes - data.count
+            if chunk.count > room { wasTruncated = true }
+            data.append(chunk.prefix(room))
+        }
+    }
+
+    /// Best-effort delivery of `data` to the child's stdin.
+    ///
+    /// A child that exits without reading would otherwise kill this process: writing to a
+    /// closed pipe raises SIGPIPE, and the legacy `write(_:)` raises an uncatchable
+    /// Objective-C exception. `F_SETNOSIGPIPE` plus the throwing `write(contentsOf:)` turn
+    /// both into an ordinary error, which is logged; the exit status reports the outcome.
+    private static func write(_ data: Data, to handle: FileHandle) {
+        guard fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1) == 0 else {
+            log.error("could not disable SIGPIPE on child stdin; not writing stdin")
+            return
+        }
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            log.error("stdin write failed: \(String(describing: error), privacy: .private)")
         }
     }
 
@@ -148,8 +182,8 @@ public struct RealProcessRunner: ProcessRunner {
                 // runs on Foundation's internal queue, so accumulators
                 // are protected by an unfair-lock (the simplest correct
                 // primitive for exclusive append from arbitrary queues).
-                let outBuf = OSAllocatedUnfairLock<Data>(initialState: Data())
-                let errBuf = OSAllocatedUnfairLock<Data>(initialState: Data())
+                let outBuf = OSAllocatedUnfairLock<CappedData>(initialState: CappedData())
+                let errBuf = OSAllocatedUnfairLock<CappedData>(initialState: CappedData())
 
                 outPipe.fileHandleForReading.readabilityHandler = { handle in
                     let chunk = handle.availableData
@@ -179,12 +213,24 @@ public struct RealProcessRunner: ProcessRunner {
                     // last readabilityHandler tick lands here.
                     let trailingOut = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
                     let trailingErr = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
-                    let outData = outBuf.withLock { $0 + trailingOut }
-                    let errData = errBuf.withLock { $0 + trailingErr }
+                    let out = outBuf.withLock { buf -> CappedData in
+                        buf.append(trailingOut)
+                        return buf
+                    }
+                    let err = errBuf.withLock { buf -> CappedData in
+                        buf.append(trailingErr)
+                        return buf
+                    }
+                    if out.wasTruncated || err.wasTruncated {
+                        let cap = Self.maxCapturedBytes
+                        log.warning(
+                            "child output exceeded \(cap, privacy: .public) bytes; truncated"
+                        )
+                    }
                     let result = ProcessResult(
                         exitCode: p.terminationStatus,
-                        stdout: String(decoding: outData, as: UTF8.self),
-                        stderr: String(decoding: errData, as: UTF8.self)
+                        stdout: String(decoding: out.data, as: UTF8.self),
+                        stderr: String(decoding: err.data, as: UTF8.self)
                     )
                     // Resume through the guard: if the timeout already
                     // fired and terminated the child, this is a no-op.
@@ -193,10 +239,6 @@ public struct RealProcessRunner: ProcessRunner {
 
                 do {
                     try proc.run()
-                    if let stdin {
-                        inPipe.fileHandleForWriting.write(stdin)
-                    }
-                    try? inPipe.fileHandleForWriting.close()
                 } catch {
                     log.error("process run failed: \(String(describing: error), privacy: .private)")
                     // proc.run() threw before launch, so
@@ -224,6 +266,13 @@ public struct RealProcessRunner: ProcessRunner {
                         seconds: Double(timeout.components.seconds)
                     ))
                 }
+
+                // Written after the timeout is armed: a child that never reads stdin
+                // would otherwise block this write past the timeout.
+                if let stdin {
+                    Self.write(stdin, to: inPipe.fileHandleForWriting)
+                }
+                try? inPipe.fileHandleForWriting.close()
             }
         } onCancel: {
             // Cooperative cancellation: SIGTERM the child so the await

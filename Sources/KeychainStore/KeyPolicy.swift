@@ -16,8 +16,8 @@
 // `KeyPolicies/<fingerprint>` (per-key). JSON is straightforward to inspect
 // in `defaults read` for diagnosis without exposing any secret material.
 
-import Foundation
-import Security
+public import Foundation
+public import Security
 
 // MARK: - KeyPolicy
 
@@ -106,6 +106,32 @@ public struct KeyPolicy: Codable, Equatable, Sendable {
         case .devicePasscode:
             return [.devicePasscode]
         }
+    }
+}
+
+/// Failure to create a `SecAccessControl`; `detail` is the `CFError` description.
+struct AccessControlCreationError: Error {
+    let detail: String
+}
+
+extension KeyPolicy {
+
+    /// Build the `SecAccessControl` for this policy.
+    func makeSecAccessControl() throws(AccessControlCreationError) -> SecAccessControl {
+        var cfError: Unmanaged<CFError>?
+        // `&cfError` is only written by the call, and only on failure.
+        guard let control = unsafe SecAccessControlCreateWithFlags(
+            kCFAllocatorDefault,
+            secAccessibility,
+            secAccessControlFlags,
+            &cfError
+        ) else {
+            // On failure the function returns a +1 CFError, so `takeRetainedValue` balances it.
+            let detail = unsafe cfError.map { unsafe String(describing: $0.takeRetainedValue()) }
+                ?? "SecAccessControlCreateWithFlags returned nil"
+            throw AccessControlCreationError(detail: detail)
+        }
+        return control
     }
 }
 
@@ -248,7 +274,7 @@ public enum KeychainEnumerator {
         }
 
         var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        let status = unsafe SecItemCopyMatching(query as CFDictionary, &result)
         guard status == errSecSuccess, let array = result as? [[String: Any]] else {
             return []
         }

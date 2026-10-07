@@ -54,9 +54,9 @@
 // stay on the legacy path without hitting errSecMissingEntitlement.
 
 import Foundation
-import LocalAuthentication
+public import LocalAuthentication
 import Security
-import SecureMemory
+public import SecureMemory
 import os
 
 // MARK: - Logger
@@ -326,10 +326,7 @@ public struct KeychainStore: Sendable {
         guard useSecureEnclaveWrap && SecureEnclaveWrap.isAvailable else {
             return bytes
         }
-        let isWrapped: Bool = bytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
-            let asData = Data(bytes: buf.baseAddress!, count: buf.count)
-            return SecureEnclaveWrap.isWrapped(asData)
-        }
+        let isWrapped = SecureEnclaveWrap.isWrapped(bytes)
         guard isWrapped else { return bytes }
 
         // Build a context if the caller did not supply one. Bare default
@@ -338,15 +335,14 @@ public struct KeychainStore: Sendable {
         let ctx = context ?? LAContext()
 
         do {
-            return try bytes.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) -> SecureBytes in
-                let blob = Data(bytes: buf.baseAddress!, count: buf.count)
-                return try SecureEnclaveWrap.unwrap(
-                    blob: blob,
-                    fingerprint: fingerprint,
-                    context: ctx,
-                    store: seWrapStore
-                )
-            }
+            // The blob is ciphertext (isWrapped), so this Data copy is not a secret.
+            let blob = Data(bytes.withSpan { span in (0..<span.count).map { span[$0] } })
+            return try SecureEnclaveWrap.unwrap(
+                blob: blob,
+                fingerprint: fingerprint,
+                context: ctx,
+                store: seWrapStore
+            )
         } catch SecureEnclaveWrapError.keyHandleDecodeFailed {
             // SL-5: the wrap-key HANDLE was rejected by the SE
             // (corrupt bytes, foreign-SE handle, re-enrollment). The
@@ -411,10 +407,7 @@ public struct KeychainStore: Sendable {
                     policy: resolvedPolicy,
                     store: seWrapStore
                 )
-                let wrappedSecure = wrapped.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> SecureBytes in
-                    let typed = raw.bindMemory(to: UInt8.self)
-                    return SecureBytes(copying: typed)
-                }
+                let wrappedSecure = SecureBytes(Array(wrapped))
                 try rawStore(
                     fingerprint: fingerprint,
                     label: label,
@@ -498,18 +491,11 @@ public struct KeychainStore: Sendable {
     /// per-call policy.
     private func makeAccessControl(policy: KeyPolicy) throws -> SecAccessControl? {
         guard requireUserPresence else { return nil }
-        var error: Unmanaged<CFError>?
-        guard let control = SecAccessControlCreateWithFlags(
-            kCFAllocatorDefault,
-            policy.secAccessibility,
-            policy.secAccessControlFlags,
-            &error
-        ) else {
-            let detail = error.map { String(describing: $0.takeRetainedValue()) }
-                ?? "SecAccessControlCreateWithFlags returned nil"
-            throw KeychainStoreError.accessControlFailed(detail)
+        do {
+            return try policy.makeSecAccessControl()
+        } catch {
+            throw KeychainStoreError.accessControlFailed(error.detail)
         }
-        return control
     }
 
     /// Build the attributes used for an insert/update. Adds the data
@@ -578,7 +564,7 @@ public struct KeychainStore: Sendable {
         var attempts = 0
         repeat {
             item = nil
-            status = SecItemCopyMatching(query as CFDictionary, &item)
+            status = unsafe SecItemCopyMatching(query as CFDictionary, &item)
             attempts += 1
         } while status == errSecAuthFailed && attempts < 2
 
@@ -609,26 +595,17 @@ public struct KeychainStore: Sendable {
         guard CFGetTypeID(itemRef) == CFDataGetTypeID() else {
             throw KeychainStoreError.unexpectedStatus(errSecInternalError)
         }
-        let cfData = itemRef as! CFData
-        let length = CFDataGetLength(cfData)
-        if length == 0 {
-            // SL-8: a zero-length entry would crash SecureBytes(copying:)'s
-            // precondition. Treat zero-length stored payloads as "no
-            // useful cache" rather than panic. The store path itself
-            // refuses zero-length passphrases, but a hostile or corrupted
-            // pre-existing keychain entry could carry one.
-            return nil
-        }
-        guard let bytesPtr = CFDataGetBytePtr(cfData) else {
-            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
-        }
-        let buf = UnsafeBufferPointer<UInt8>(start: bytesPtr, count: length)
-        let secure = SecureBytes(copying: buf)
+        // SL-8: a zero-length entry would crash SecureBytes(copying:)'s
+        // precondition. Treat zero-length stored payloads as "no useful
+        // cache" rather than panic. The store path itself refuses
+        // zero-length passphrases, but a hostile or corrupted pre-existing
+        // keychain entry could carry one.
+        //
         // CFData ref is owned by `item` / `itemRef`; releasing it returns
         // the bytes to the CF allocator pool unwiped (a known macOS
         // keychain reality outside our control). The fact that we never
         // bridged to Swift Data means at least no COW copy persists.
-        return secure
+        return try Self.copySecureBytes(from: itemRef as! CFData)
     }
 
     /// Same as `rawLookup` but additionally returns the entry's
@@ -660,7 +637,7 @@ public struct KeychainStore: Sendable {
         var attempts = 0
         repeat {
             item = nil
-            status = SecItemCopyMatching(query as CFDictionary, &item)
+            status = unsafe SecItemCopyMatching(query as CFDictionary, &item)
             attempts += 1
         } while status == errSecAuthFailed && attempts < 2
 
@@ -684,16 +661,28 @@ public struct KeychainStore: Sendable {
         guard let cfData = dict[kSecValueData as String] as! CFData? else {
             throw KeychainStoreError.unexpectedStatus(errSecInternalError)
         }
-        let length = CFDataGetLength(cfData)
-        if length == 0 { return nil }
-        guard let bytesPtr = CFDataGetBytePtr(cfData) else {
-            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
-        }
-        let buf = UnsafeBufferPointer<UInt8>(start: bytesPtr, count: length)
-        let secure = SecureBytes(copying: buf)
+        guard let secure = try Self.copySecureBytes(from: cfData) else { return nil }
 
         let creationDate = dict[kSecAttrCreationDate as String] as? Date
         return LookupWithAttrs(bytes: secure, creationDate: creationDate)
+    }
+
+    /// Copy the bytes of `cfData` into locked `SecureBytes`, or nil when empty.
+    ///
+    /// Empty and over-`SecureBytes.maxLength` payloads also yield nil: either can be planted
+    /// in the same-user-writable legacy keychain, and `SecureBytes(copying:)` traps on both.
+    static func copySecureBytes(from cfData: CFData) throws -> SecureBytes? {
+        let length = CFDataGetLength(cfData)
+        if length == 0 || length > SecureBytes.maxLength { return nil }
+        guard let bytesPtr = unsafe CFDataGetBytePtr(cfData) else {
+            throw KeychainStoreError.unexpectedStatus(errSecInternalError)
+        }
+        // `cfData` must outlive the copy: the optimizer may otherwise release it after
+        // its last syntactic use, leaving `bytesPtr` dangling. `length` bytes are
+        // readable at `bytesPtr` for as long as `cfData` is alive.
+        return withExtendedLifetime(cfData) {
+            unsafe SecureBytes(copying: UnsafeBufferPointer(start: bytesPtr, count: length))
+        }
     }
 
     /// Return true if `creationDate + policy.cacheTTLSeconds < now`,
@@ -716,6 +705,30 @@ public struct KeychainStore: Sendable {
             keychainLogger.error("TTL eviction delete failed: \(String(describing: error), privacy: .public)")
         }
         return true
+    }
+
+    /// Run `body` with a `CFData` that views `passphrase` in place, without copying.
+    ///
+    /// Throws `errSecParam` for an empty passphrase (SL-8: it would create a useless keychain
+    /// entry and trap `SecureBytes(copying:)` on read-back). The `CFData` must not be retained
+    /// past `body`: it does not own the bytes.
+    private static func withCFData<R>(
+        viewing passphrase: SecureBytes,
+        _ body: (CFData) throws -> R
+    ) throws -> R {
+        // `kCFAllocatorNull` makes CF neither copy nor free the buffer, which stays valid
+        // for the whole closure; `body` is the only code that can see the CFData.
+        try unsafe passphrase.withUnsafeBytes { buf in
+            guard buf.count > 0, let base = buf.baseAddress else {
+                throw KeychainStoreError.unexpectedStatus(errSecParam)
+            }
+            guard let cfData = unsafe CFDataCreateWithBytesNoCopy(
+                kCFAllocatorDefault, base, buf.count, kCFAllocatorNull
+            ) else {
+                throw KeychainStoreError.unexpectedStatus(errSecAllocate)
+            }
+            return try body(cfData)
+        }
     }
 
     private func rawStore(
@@ -761,30 +774,11 @@ public struct KeychainStore: Sendable {
         // before we touch the keychain. nil for legacy / opt-out paths.
         let accessControl = dataProtection ? try makeAccessControl(policy: policy) : nil
 
-        // SL-3: build a CFData around the passphrase bytes WITHOUT copying.
-        // CFDataCreateWithBytesNoCopy + kCFAllocatorNull tells CF to use
-        // the buffer in place and never free it. The buffer lives inside
-        // the SecureBytes-backed mlock'd page, which is wiped via
-        // memset_s on the SecureBytes deinit / scope exit. CFRelease on
-        // cfData therefore does not leak unwiped cleartext into the CF
-        // allocator pool, and SecItem* APIs copy the bytes into their
-        // own internal buffer (which is outside our control either way).
-        try passphrase.withUnsafeBytes { (buf: UnsafeBufferPointer<UInt8>) in
-            guard buf.count > 0, let base = buf.baseAddress else {
-                // SL-8: refuse zero-length writes — they would create a
-                // useless keychain entry and crash the rawLookup
-                // SecureBytes precondition on read-back.
-                throw KeychainStoreError.unexpectedStatus(errSecParam)
-            }
-            guard let cfData = CFDataCreateWithBytesNoCopy(
-                kCFAllocatorDefault,
-                base,
-                buf.count,
-                kCFAllocatorNull
-            ) else {
-                throw KeychainStoreError.unexpectedStatus(errSecAllocate)
-            }
-
+        // SL-3: the CFData views the passphrase bytes in place (no copy), so
+        // CFRelease on it does not leak unwiped cleartext into the CF
+        // allocator pool. SecItem* APIs copy the bytes into their own
+        // internal buffer (which is outside our control either way).
+        try Self.withCFData(viewing: passphrase) { cfData in
             // Use the same probe (sans UISkip) as the identity query for
             // SecItemUpdate; the update key set must not include
             // kSecUseAuthenticationUI.

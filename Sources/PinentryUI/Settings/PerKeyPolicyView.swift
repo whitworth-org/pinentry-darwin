@@ -1,48 +1,31 @@
 // SPDX-License-Identifier: MIT
 // Copyright 2026 Ryan Whitworth.
 //
-// PerKeyPolicyView.swift — Settings → Per-Key tab.
+// PerKeyPolicyView.swift — Settings → Per-key policy tab.
 //
-// Lists each fingerprint that currently has a cached entry in the
-// data-protection keychain, plus a "Default for new keys" section at the
-// top. Each row exposes:
+// Lists each key that has a saved passphrase in the data-protection
+// Keychain, plus a default policy for new keys. Each key row expands to
+// the same three controls (authentication, availability, cache duration),
+// "Reset to default", and "Forget passphrase…".
 //
-//   - Biometry requirement (Picker)
-//   - Accessibility class (Picker)
-//   - Cache TTL (Stepper)
-//   - Forget button (calls back to the executable which deletes the
-//     keychain entry AND removes the per-key override)
-//
-// The enumeration query uses `kSecUseAuthenticationUISkip` so opening
-// Settings never fires a Touch ID sheet — only the per-key Forget action
-// triggers an unlock prompt (because SecItemDelete on a `.userPresence`
-// entry can prompt, depending on user posture).
-//
-// Persistence: writes go through `KeyPolicyStore` immediately on toggle
-// change. There is no Save button — that matches the rest of Settings.
+// Enumeration uses `kSecUseAuthenticationUISkip`, so opening Settings
+// never shows a Touch ID sheet. Policy changes are written immediately;
+// there is no Save button.
 
-import SwiftUI
-import KeychainStore
+public import KeychainStore
+public import SwiftUI
 
 public struct PerKeyPolicyView: View {
 
-    /// Optional callback to delete an entry's keychain row. Provided by
-    /// the executable so the view does not need to import a clear-by-
-    /// fingerprint API directly. nil disables the Forget button.
-    public typealias ForgetCallback = @Sendable (String) async -> Void
+    /// Deletes the Keychain entry for a fingerprint. Provided by the
+    /// executable so the view needs no clear-by-fingerprint API. Throws if
+    /// the delete failed, in which case the view keeps the key's policy.
+    /// nil hides the Forget action.
+    public typealias ForgetCallback = @concurrent @Sendable (String) async throws -> Void
 
-    private let store: KeyPolicyStore
-    private let service: String
-    private let useDataProtectionKeychain: Bool
-    private let forget: ForgetCallback?
-
-    /// Re-enumerated on appear and after Forget. Sorted lexically so
-    /// rows are stable across refreshes.
-    @State private var fingerprints: [String] = []
-    /// Bumped to force per-row policy reads after a save. Cheap because
-    /// the underlying store is a JSON-in-UserDefaults lookup.
-    @State private var refreshTick = 0
-    @State private var defaultPolicy: KeyPolicy = .legacyDefault
+    @State private var model: PerKeyPolicyModel
+    @State private var expanded: Set<String>
+    @State private var pendingForget: String?
 
     public init(
         store: KeyPolicyStore = KeyPolicyStore(),
@@ -50,155 +33,146 @@ public struct PerKeyPolicyView: View {
         useDataProtectionKeychain: Bool = true,
         forget: ForgetCallback? = nil
     ) {
-        self.store = store
-        self.service = service
-        self.useDataProtectionKeychain = useDataProtectionKeychain
-        self.forget = forget
+        self.init(
+            model: PerKeyPolicyModel(
+                store: store,
+                enumerate: {
+                    KeychainEnumerator.fingerprints(
+                        service: service,
+                        useDataProtectionKeychain: useDataProtectionKeychain
+                    )
+                },
+                forget: forget
+            )
+        )
+    }
+
+    init(model: PerKeyPolicyModel, expanded: Set<String> = []) {
+        self._model = State(initialValue: model)
+        self._expanded = State(initialValue: expanded)
     }
 
     public var body: some View {
         Form {
-            Section("Default for new keys") {
-                policyEditor(
-                    title: "Default",
-                    policy: defaultPolicy,
-                    onChange: { updated in
-                        defaultPolicy = updated
-                        store.setDefaultPolicy(updated)
-                    }
-                )
-                Text("Applied when you tick \"Save in Keychain\" for a key that has no per-key override.")
-                    .font(Theme.captionFont)
-                    .foregroundStyle(Color.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            if fingerprints.isEmpty {
-                Section("Saved keys") {
-                    Text("No cached passphrases yet. Save one from a pinentry dialog and it will appear here.")
-                        .font(Theme.captionFont)
-                        .foregroundStyle(Color.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                ForEach(fingerprints, id: \.self) { fpr in
-                    Section(displayFingerprint(fpr)) {
-                        // refreshTick forces a re-read whenever a sibling
-                        // row's save bumps it; without it SwiftUI would
-                        // cache the original closure-captured policy.
-                        let _ = refreshTick
-                        let row = store.policy(for: fpr)
-                        let hasOverride = store.override(for: fpr) != nil
-
-                        policyEditor(
-                            title: fpr,
-                            policy: row,
-                            onChange: { updated in
-                                store.setPolicy(updated, for: fpr)
-                                refreshTick &+= 1
-                            }
-                        )
-
-                        HStack {
-                            if hasOverride {
-                                Button("Reset to default") {
-                                    store.removeOverride(for: fpr)
-                                    refreshTick &+= 1
-                                }
-                            }
-                            Spacer()
-                            if let forget {
-                                Button(role: .destructive) {
-                                    Task { @MainActor in
-                                        await forget(fpr)
-                                        store.removeOverride(for: fpr)
-                                        refresh()
-                                    }
-                                } label: {
-                                    Text("Forget this key")
-                                        .foregroundStyle(Theme.errorText)
-                                }
-                            }
-                        }
-                    }
+            if let message = model.errorMessage {
+                Section {
+                    SettingsBanner(kind: .error, message: message) { model.errorMessage = nil }
                 }
             }
+            defaultSection
+            savedKeysSection
         }
-        .padding(Theme.mediumPadding)
-        .onAppear {
-            defaultPolicy = store.defaultPolicy
-            refresh()
+        .formStyle(.grouped)
+        .task { await model.load() }
+        .confirmationDialog(
+            "Forget the saved passphrase?",
+            isPresented: Binding(
+                get: { pendingForget != nil },
+                set: { if !$0 { pendingForget = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: pendingForget
+        ) { fingerprint in
+            Button("Forget passphrase", role: .destructive) {
+                Task { await model.forget(fingerprint) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { fingerprint in
+            Text(
+                "\(KeyIdentifier.abbreviated(fingerprint)) is removed from the Keychain "
+                    + "along with its policy. GnuPG asks for the passphrase next time."
+            )
         }
     }
 
-    // MARK: - Subviews
+    // MARK: - Sections
+
+    private var defaultSection: some View {
+        Section {
+            PolicyControls(policy: model.defaultPolicy, onChange: model.setDefault)
+        } header: {
+            Text("Default for new keys")
+        } footer: {
+            Text("Used when you choose Save in Keychain for a key without its own policy.")
+        }
+    }
+
+    private var savedKeysSection: some View {
+        Section {
+            switch model.phase {
+            case .loading:
+                HStack(spacing: Theme.smallPadding) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading saved keys…").foregroundStyle(.secondary)
+                }
+                .accessibilityElement(children: .combine)
+            case .loaded where model.rows.isEmpty:
+                Text("No saved passphrases. Choose Save in Keychain in a passphrase dialog "
+                    + "and the key appears here.")
+                    .foregroundStyle(.secondary)
+            case .loaded:
+                ForEach(model.rows) { row in keyRow(row) }
+            }
+        } header: {
+            Text("Saved keys")
+        }
+    }
+
+    // MARK: - Key row
+
+    private func keyRow(_ row: PerKeyPolicyModel.Row) -> some View {
+        DisclosureGroup(isExpanded: expansion(for: row.fingerprint)) {
+            PolicyControls(
+                policy: row.policy,
+                onChange: { model.setPolicy($0, for: row.fingerprint) }
+            )
+            rowActions(row)
+        } label: {
+            KeyRowLabel(row: row)
+        }
+        .contextMenu {
+            Button("Copy fingerprint") { Pasteboard.copy(row.fingerprint.uppercased()) }
+            if row.hasOverride {
+                Button("Reset to default") { model.resetOverride(for: row.fingerprint) }
+            }
+            if model.canForget {
+                Button("Forget passphrase…", role: .destructive) {
+                    pendingForget = row.fingerprint
+                }
+                .disabled(model.forgetting != nil)
+            }
+        }
+    }
 
     @ViewBuilder
-    private func policyEditor(
-        title: String,
-        policy: KeyPolicy,
-        onChange: @escaping (KeyPolicy) -> Void
-    ) -> some View {
-        // SwiftUI Picker bindings work on the policy fields directly.
-        Picker("Authentication", selection: Binding(
-            get: { policy.biometry },
-            set: { onChange(KeyPolicy(biometry: $0,
-                                      accessibility: policy.accessibility,
-                                      cacheTTLSeconds: policy.cacheTTLSeconds)) }
-        )) {
-            Text("Touch ID or passcode").tag(KeyPolicy.BiometryRequirement.userPresence)
-            Text("Biometry (current set)").tag(KeyPolicy.BiometryRequirement.biometryCurrentSet)
-            Text("Biometry (any enrolled)").tag(KeyPolicy.BiometryRequirement.biometryAny)
-            Text("Passcode only").tag(KeyPolicy.BiometryRequirement.devicePasscode)
+    private func rowActions(_ row: PerKeyPolicyModel.Row) -> some View {
+        LabeledContent("Fingerprint") {
+            Text(KeyIdentifier.grouped(row.fingerprint))
+                .font(.system(.caption, design: .monospaced))
+                .textSelection(.enabled)
+                .multilineTextAlignment(.trailing)
         }
-        .pickerStyle(.menu)
-
-        Picker("Accessibility", selection: Binding(
-            get: { policy.accessibility },
-            set: { onChange(KeyPolicy(biometry: policy.biometry,
-                                      accessibility: $0,
-                                      cacheTTLSeconds: policy.cacheTTLSeconds)) }
-        )) {
-            Text("When unlocked").tag(KeyPolicy.Accessibility.whenUnlocked)
-            Text("When passcode is set").tag(KeyPolicy.Accessibility.whenPasscodeSet)
-        }
-        .pickerStyle(.menu)
-
-        Picker("Cache duration", selection: Binding(
-            get: { policy.cacheTTLSeconds ?? 0 },
-            set: { newValue in
-                let ttl: Int? = newValue == 0 ? nil : newValue
-                onChange(KeyPolicy(biometry: policy.biometry,
-                                   accessibility: policy.accessibility,
-                                   cacheTTLSeconds: ttl))
+        HStack {
+            if row.hasOverride {
+                Button("Reset to default") { model.resetOverride(for: row.fingerprint) }
             }
-        )) {
-            Text("Until cleared").tag(0)
-            Text("5 minutes").tag(5 * 60)
-            Text("1 hour").tag(60 * 60)
-            Text("8 hours").tag(8 * 60 * 60)
-            Text("1 day").tag(24 * 60 * 60)
+            Spacer()
+            if model.canForget {
+                Button("Forget passphrase…", role: .destructive) {
+                    pendingForget = row.fingerprint
+                }
+                .foregroundStyle(Theme.errorText)
+                .disabled(model.forgetting != nil)
+            }
         }
-        .pickerStyle(.menu)
     }
 
-    // MARK: - Helpers
-
-    private func refresh() {
-        fingerprints = KeychainEnumerator.fingerprints(
-            service: service,
-            useDataProtectionKeychain: useDataProtectionKeychain
+    private func expansion(for fingerprint: String) -> Binding<Bool> {
+        Binding(
+            get: { expanded.contains(fingerprint) },
+            set: { isOpen in
+                if isOpen { expanded.insert(fingerprint) } else { expanded.remove(fingerprint) }
+            }
         )
-    }
-
-    /// Display a fingerprint as `0x` + first 16 hex chars (matches the
-    /// format gpg uses for the short key id) so the row header is human-
-    /// scannable. The full fingerprint is the actual record key.
-    private func displayFingerprint(_ fpr: String) -> String {
-        let upper = fpr.uppercased()
-        if upper.count >= 16 {
-            return "0x" + String(upper.prefix(16))
-        }
-        return "0x" + upper
     }
 }
