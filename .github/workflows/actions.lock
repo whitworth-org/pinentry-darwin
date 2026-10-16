@@ -6,11 +6,11 @@ workflows:
     '.github/workflows/ci.yml':
         - 'actions/cache@v6.1.0'
         - 'actions/checkout@v7.0.1'
-        - 'step-security/harden-runner@v2.21.1'
+        - 'step-security/harden-runner@v2.22.0'
         - 'zizmorcore/zizmor-action@v0.6.4'
     '.github/workflows/release.yml':
         - 'actions/checkout@v7.0.1'
-        - 'step-security/harden-runner@v2.21.1'
+        - 'step-security/harden-runner@v2.22.0'
 dependencies:
     'actions/cache@v6.1.0':
         ref: 'v6.1.0'
@@ -27,9 +27,9 @@ dependencies:
         commit: 'sha1-cdf488f595d80d6e07e03d4674febd5ab45fa938'
         owner_id: 9919
         repo_id: 259445878
-    'step-security/harden-runner@v2.21.1':
-        ref: 'v2.21.1'
-        commit: 'sha1-e14015d583714f6e62063499dc959a02595150a1'
+    'step-security/harden-runner@v2.22.0':
+        ref: 'v2.22.0'
+        commit: 'sha1-351661ca32ac09a36dc5ee2d536e3128f2a3c8ed'
         owner_id: 88700172
         repo_id: 422287306
     'zizmorcore/zizmor-action@v0.6.4':
