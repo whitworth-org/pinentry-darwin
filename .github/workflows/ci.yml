@@ -42,7 +42,7 @@ jobs:
       actions: read  # cache telemetry + harden-runner egress baseline
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        uses: step-security/harden-runner@v2.22.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -57,7 +57,7 @@ jobs:
             raw.githubusercontent.com:443
 
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -80,7 +80,7 @@ jobs:
           fi
 
       - name: Cache .build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@v6.1.0
         with:
           path: .build
           key: ${{ runner.os }}-swiftbuild-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Tests/**') }}
@@ -118,7 +118,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed # v2.22.0
+        uses: step-security/harden-runner@v2.22.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -131,7 +131,7 @@ jobs:
             raw.githubusercontent.com:443
 
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
@@ -140,7 +140,7 @@ jobs:
         # where code-scanning SARIF upload requires GHAS. Findings surface
         # as PR annotations instead. (Re-enable if the repo goes public or
         # buys GHAS.) zizmor is a hard gate: non-zero exit fails the job.
-        uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        uses: zizmorcore/zizmor-action@v0.6.4
         with:
           advanced-security: false
           annotations: true
