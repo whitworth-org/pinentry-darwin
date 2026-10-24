@@ -6,11 +6,11 @@ workflows:
     '.github/workflows/ci.yml':
         - 'actions/cache@v6.1.0'
         - 'actions/checkout@v7.0.1'
-        - 'step-security/harden-runner@v2.22.0'
-        - 'zizmorcore/zizmor-action@v0.6.4'
+        - 'step-security/harden-runner@v2.22.1'
+        - 'zizmorcore/zizmor-action@v0.7.1'
     '.github/workflows/release.yml':
         - 'actions/checkout@v7.0.1'
-        - 'step-security/harden-runner@v2.22.0'
+        - 'step-security/harden-runner@v2.22.1'
 dependencies:
     'actions/cache@v6.1.0':
         ref: 'v6.1.0'
@@ -22,20 +22,20 @@ dependencies:
         commit: 'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'
         owner_id: 44036562
         repo_id: 197814629
-    'github/codeql-action@cdf488f595d80d6e07e03d4674febd5ab45fa938':
-        ref: 'v4.37.9'
-        commit: 'sha1-cdf488f595d80d6e07e03d4674febd5ab45fa938'
+    'github/codeql-action@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2':
+        ref: 'v4.38.2'
+        commit: 'sha1-2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2'
         owner_id: 9919
         repo_id: 259445878
-    'step-security/harden-runner@v2.22.0':
-        ref: 'v2.22.0'
-        commit: 'sha1-351661ca32ac09a36dc5ee2d536e3128f2a3c8ed'
+    'step-security/harden-runner@v2.22.1':
+        ref: 'v2.22.1'
+        commit: 'sha1-ccd8616d44fd3846e67624a50d5aad6d37bf2d25'
         owner_id: 88700172
         repo_id: 422287306
-    'zizmorcore/zizmor-action@v0.6.4':
-        ref: 'v0.6.4'
-        commit: 'sha1-cc914d7f3750a2d13d75c7f184a1060aa0e9d482'
+    'zizmorcore/zizmor-action@v0.7.1':
+        ref: 'v0.7.1'
+        commit: 'sha1-85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e'
         owner_id: 210636713
         repo_id: 985558803
         uses:
-            - 'github/codeql-action@cdf488f595d80d6e07e03d4674febd5ab45fa938'
+            - 'github/codeql-action@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2'
